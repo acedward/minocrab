@@ -63,6 +63,7 @@ minocrab-sim = { path = "../minocrab-sim", features = ["unstable"] }
 midnight-onchain-state.workspace = true
 midnight-storage.workspace = true
 midnight-base-crypto.workspace = true
+midnight-onchain-vm.workspace = true
 minocrab-ir = { path = "../minocrab-ir", features = ["unstable"] }
 minocrab-zkir = { path = "../minocrab-zkir" }
 # v3 secp tests generate ECDSA signatures through zkir-v3's own off-circuit

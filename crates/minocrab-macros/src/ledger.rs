@@ -102,7 +102,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     // every other field's is. Threading it is what lets `request` /
     // `complete` / `refund` take no `&SELF.signet` argument.
     let signets: Vec<usize> = (0..fields.len()).filter(|i| named_as(types[*i], "Signet")).collect();
-    // `Pending`, `Fired` and `Queued` alike: all three are `evm_flow` slots
+    // `Pending`, `Fired` and `Outbox` alike: all three are `evm_flow` slots
     // that read the block's Signet configuration, and none takes a
     // `&SELF.signet`.
     let pendings: Vec<usize> = (0..fields.len())
@@ -179,11 +179,11 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
 }
 
 /// Is this field one of the `evm_flow` slots built against the block's
-/// `Signet` — `Pending`, `Fired` or `Queued`?
+/// `Signet` — `Pending`, `Fired` or `Outbox`?
 ///
 /// Spelling, like [`named_as`]: the derive sees tokens, not resolutions.
 fn is_signet_slot(ty: &syn::Type) -> bool {
-    named_as(ty, "Pending") || named_as(ty, "Fired") || named_as(ty, "Queued")
+    named_as(ty, "Pending") || named_as(ty, "Fired") || named_as(ty, "Outbox")
 }
 
 /// Is this type SPELLED `name` — is the last segment of its path that

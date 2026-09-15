@@ -1259,17 +1259,17 @@ fn build_tx_at<C: EvmCall, const WORDS: usize>(
     finish_tx::<C, WORDS>(c, words, Envelope::fixed(), |_| callee, nonce, gas_limit)
 }
 
-/// [`build_tx`] FROM WORDS THAT ARE ALREADY ENCODED — what a BATCHED flush
-/// has, and all it has: the argument words were encoded at INSERT, from
-/// typed wires, and have been sitting in the queue as stored limbs ever
-/// since ([`crate::evm_flow::Queued`]).
+/// [`build_tx`] FROM WORDS THAT ARE ALREADY ENCODED — what an outbox EMIT
+/// has, and all it has: the argument words were encoded at the CALL, from
+/// typed wires, and have been sitting in the outbox as stored limbs ever
+/// since ([`crate::evm_flow::Outbox`]).
 ///
 /// Everything else is [`build_tx`]: the same const-checked `WORDS`, the same
-/// emission order through `finish_tx`. Two things the flush supplies rather
-/// than the queue, because supplying them IS the flush (notes/nonce-admin.org
-/// §4, §1.1): the NONCE, which the contract assigns from its own counter,
-/// and the ENVELOPE, which is the contract's — neither is ever a requester's
-/// argument.
+/// emission order through `finish_tx`. Two things the emit supplies rather
+/// than the stored entry, because supplying them IS the emit
+/// (notes/nonce-admin.org §4, §1.1): the NONCE, which the contract assigned
+/// blind at the call and the emit reads off the snapshot, and the ENVELOPE,
+/// which is the contract's — neither is ever a requester's argument.
 ///
 /// The words are a LEDGER READ privatized, not a prover's value: nothing
 /// re-encodes them here and nothing needs to, because the read's `popeq`

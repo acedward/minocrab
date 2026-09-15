@@ -166,7 +166,7 @@ circuit flush(keys: Vector<4, Maybe<Uint<64>>>): [] {
 fn flush(c: &mut Circuit3, keys: NonEmpty<Uint<64>, 3>) -> Discloses<(FlushKeys,)> {
     let keys = keys.disclose_as::<FlushKeys>(c);
     keys.for_each(c, |c, k| QUEUE.remove(c, k));            // guarded per slot, the head unconditionally
-    Discloses::new(())
+    Discloses::of(())
 }
 ```
 
@@ -426,6 +426,39 @@ What the types do:
 One hazard the types cannot see: the MPC resolves a request as FAILED when the return data does not decode, so a non-conforming ERC-20 returning nothing produces an attested failure for a transfer that moved the tokens. Until the callee's return shape is declared per token, a contract on this API needs a callee allow-list.
 
 [signet-sim](crates/signet-sim) is the MPC's reader and responder, so a flow round-trips under `cargo test` without an MPC. Costs are the same shape as compactc's and lower where the API does less: `supply` k14 / 11,474 rows against the port's k15 / 23,038; `complete_withdraw` k15 / 25,655 against the deployed k16 / 35,553 ([erc20_vault_pending.rs](crates/minocrab-contracts/tests/erc20_vault_pending.rs)).
+
+### The outbox: a contention-free call queue
+
+The pattern the blind ops exist for, and one Compact cannot write (every ledger read it compiles is a `popeq`; see "Blind ledger update" above). `Outbox<Filing, Env, WORDS>` is a `Pending` plus a primitive `Stream` whose accumulator is `(last nonce, last seen)` under `(Add, Max)`: a `call` files the transaction minus its nonce under the hash of the pre-record and lets the ledger add one to the nonce and snapshot both cells into the call's entry, blind; an `emit` — one request, anyone may prove it — reads that entry back (written once, so its `popeq` cannot go stale), builds the transaction at the snapshotted nonce, files the record and notifies the MPC; a settle is `Pending`'s, then the response's height must be after the call's last seen (the spec's C3) and last seen is raised by a blind max. No circuit reads either accumulator cell, so calls, emits and responses all land in one block; the audit is on the emitted Impact stream ([evm_outbox.rs](crates/minocrab-contracts/tests/evm_outbox.rs)).
+
+```rust
+#[derive(Ledger)]
+struct Block { signet: Signet, calls: Outbox<Kinded<Transfer, 1>, HandleOwned<Amount>, 2> }
+
+#[circuit]
+fn call(c: &mut Circuit3, key_version: Uint<8>, token: Contract<Erc20>, to: Bytes<20>, amount: Uint<64>)
+    -> Discloses<(Sent, Owner, Inserted)> {
+    BLOCK.calls.call_owned::<Owner>(c, token, (to, amount.widen::<128>()), key_version, |_, _| Amount { .. });
+    Discloses::of(())
+}
+#[circuit]
+fn emit(c: &mut Circuit3, handle: Handle) -> Discloses<Emitted> { BLOCK.calls.emit(c, handle); Discloses::of(()) }
+#[circuit]
+fn complete(c: &mut Circuit3, ticket: Succeeded<Kinded<Transfer, 1>>) -> Discloses<(Settled, Height)> {
+    let outcome = BLOCK.calls.complete(c, ticket);
+    BLOCK.calls.raise_seen::<Height>(c, &outcome.env, outcome.output);   // C3, then the blind max
+    Discloses::of(())
+}
+```
+
+| circuit | k | rows | checked reads | of which shared |
+|---|---|---|---|---|
+| `call` | 10 | 924 | 1 (the handle's not-member check) | 0 |
+| `emit` | 10 | 1,004 | 10 | 1 (the Signet request nonce, the protocol record's counter) |
+| `complete` | 15 | 25,675 | 4 | 0 |
+| `refund` | 15 | 26,073 | 4 | 0 |
+
+The serial twin — a step that is not a monoid, such as a moving average — keeps the same `insert` / `take` / `combine` and adds a `sequence` that flushes one to four keys through one `popeq` of the accumulator ([fee_ema.rs](crates/minocrab-contracts/tests/fee_ema.rs): report k8 / 130 rows, sequence k10 / 1,008, settle k7 / 108).
 
 ## Porting kit
 

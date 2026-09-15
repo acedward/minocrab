@@ -697,3 +697,5 @@ circuit flushA<#N>(numbers: Vector<N, Uint<64>>): [] {
 }
 export circuit flushA4(numbers: Vector<4, Uint<64>>): [] { flushA<4>(numbers); }
 #+end_src
+
+Superseded for the stream (2026-09-15): the two-phase flush is now =minocrab_std::v3::Stream= with =Serial<F, REST>= (the popeq path costed above) beside the blind primitive path that needs no flush at all; the as-built costs — the outbox's call/emit/complete/refund and FeeEma's report/sequence/settle — are in notes/stream-design.org, "M41 as built".

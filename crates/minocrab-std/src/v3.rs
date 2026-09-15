@@ -32,6 +32,7 @@ mod ledger;
 /// blind snapshot into a per-key map. Written module-qualified
 /// (`blind::Max`) except for the two traits.
 pub mod blind;
+mod stream;
 mod vector;
 
 /// Compact's `kernel` ADT and the token stdlib built on it (M17) — always
@@ -55,6 +56,7 @@ pub mod borsh;
 pub mod hash;
 
 pub use blind::{Monoid, Primitive};
+pub use stream::{ContentionFree, Fold, Serial, Step, Stream, StreamSpec};
 pub use vector::{Bounded, NonEmpty};
 pub use entry::{entry, entry_out, ArgPath, CircuitArg, CircuitArgs, CircuitOut};
 

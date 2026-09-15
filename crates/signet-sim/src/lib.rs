@@ -400,24 +400,26 @@ mod tests {
         assert!(matches!(sim.respond(&payload(id, caller, &[1]), &root2, EvmOutcome::NeverExecuted), Err(Refusal::Dropped { reason: "rid-mismatch", .. })));
     }
 
-    /// A BATCH, AS THE MPC SEES IT (M39 rung D): N sign events from ONE
-    /// Midnight transaction, over one caller state, at CONSECUTIVE EVM
-    /// nonces.
+    /// N OUTBOX CALLS, AS THE MPC SEES THEM (M39 rung D, retargeted at the
+    /// outbox in M41 C): N sign events at CONSECUTIVE EVM nonces, whether
+    /// they were emitted in one Midnight transaction or N.
     ///
-    /// What `evm_flow::Queued::flush` files is exactly this: N records in
-    /// the slot's one record map, each built by the same `file_request` an
-    /// unbatched request uses, differing in the contract's request nonce
-    /// (the counter is read and bumped once per filing) and in the EVM nonce
-    /// (`last_nonce + 1 … + N`, assigned by the contract, never by a
-    /// requester). The MPC's side of that is N notifications naming N ids
-    /// against one state — and it answers each one, because nothing in the
-    /// reader is per-transaction.
+    /// What `evm_flow::Outbox::emit` files is exactly this: one record per
+    /// emitted call in the slot's one record map, each built by the same
+    /// `file_request` an unbatched request uses, differing in the contract's
+    /// request nonce (the counter is read and bumped once per filing) and in
+    /// the EVM nonce — which the CALL assigned blind (`last + 1`, the
+    /// ledger's own add, snapshotted into the call's entry) and the emit
+    /// read off that landed snapshot, never a requester's choice (the spec's
+    /// O3: state is a function of the source chain). The MPC's side of that
+    /// is N notifications naming N ids against one state — and it answers
+    /// each one, because nothing in the reader is per-transaction.
     ///
-    /// The batch's whole point is checked here rather than assumed: the
-    /// nonces the MPC will submit under are consecutive and in filing order,
+    /// The outbox's whole point is checked here rather than assumed: the
+    /// nonces the MPC will submit under are consecutive and in call order,
     /// so no two of them race for the same one and none of them leaves a gap.
     #[test]
-    fn the_sim_answers_a_batch_at_consecutive_nonces() {
+    fn the_sim_answers_emitted_calls_at_consecutive_nonces() {
         const N: u64 = 4;
         const LAST_NONCE: u64 = 41;
         const FIRST_REQUEST_NONCE: u64 = 7;
@@ -425,17 +427,18 @@ mod tests {
         let batch: Vec<SignBidirectionalRecordV2> = (0..N)
             .map(|i| {
                 let mut record = sample_v2();
-                // One `file_request` per entry: the contract's request
+                // One `file_request` per emit: the contract's request
                 // counter is read and incremented once each…
                 record.request_nonce = FIRST_REQUEST_NONCE + i;
-                // …and the EVM nonce is the flush's assignment.
+                // …and the EVM nonce is the call's blind assignment, read
+                // off its snapshot at the emit.
                 record.tx_params.nonce = LAST_NONCE + 1 + i;
                 record
             })
             .collect();
 
-        // One map, one state: a flush writes all N into the slot's record
-        // map in one transaction.
+        // One map, one state: every emit writes into the slot's one record
+        // map.
         let mut map: HashMap<AlignedValue, StateValue<DefaultDB>, DefaultDB> = HashMap::new();
         let mut ids = Vec::new();
         for record in &batch {
@@ -477,11 +480,10 @@ mod tests {
         }
 
         // The transactions the MPC will sign and submit: consecutive, in
-        // filing order, starting one past the last nonce the slot assigned.
+        // call order, starting one past the last nonce the slot assigned.
         assert_eq!(nonces, (LAST_NONCE + 1..=LAST_NONCE + N).collect::<Vec<_>>());
 
-        // …and the batch is a window, not a set: an id the flush did not
-        // file is absent from the same state.
+        // …and an id no emit filed is absent from the same state.
         let mut unfiled = ids[0];
         unfiled[0] ^= 1;
         assert!(matches!(
