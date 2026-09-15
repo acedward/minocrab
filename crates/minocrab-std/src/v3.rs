@@ -32,6 +32,7 @@ mod ledger;
 /// blind snapshot into a per-key map. Written module-qualified
 /// (`blind::Max`) except for the two traits.
 pub mod blind;
+mod vector;
 
 /// Compact's `kernel` ADT and the token stdlib built on it (M17) — always
 /// written module-qualified (`kernel::balance(c, &t)`), because a kernel
@@ -54,6 +55,7 @@ pub mod borsh;
 pub mod hash;
 
 pub use blind::{Monoid, Primitive};
+pub use vector::{Bounded, NonEmpty};
 pub use entry::{entry, entry_out, ArgPath, CircuitArg, CircuitArgs, CircuitOut};
 
 /// The ledger block as types: `#[derive(Ledger)]`'s declaration-order

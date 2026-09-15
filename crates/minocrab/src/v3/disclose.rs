@@ -237,6 +237,23 @@ impl<T: IrTy> Disclose for Vec<Wire3<T, Private>> {
     }
 }
 
+/// An array: every element under the one label, in order — a bounded
+/// vector's slots (`minocrab_std::v3::Bounded`).
+impl<T: Disclose, const N: usize> Disclose for [T; N] {
+    type Public = [T::Public; N];
+
+    fn disclose_as<L: DisclosureLabel>(self, c: &mut Circuit3) -> Self::Public {
+        let mut out = Vec::with_capacity(N);
+        for element in self {
+            out.push(element.disclose_as::<L>(c));
+        }
+        match <[T::Public; N]>::try_from(out) {
+            Ok(array) => array,
+            Err(_) => unreachable!("one disclosure per element"),
+        }
+    }
+}
+
 // ---- the declaration --------------------------------------------------------
 
 /// A circuit's return type: `D` is the set of labels it discloses, `R` the

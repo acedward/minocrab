@@ -447,6 +447,37 @@ impl Select<Public> for Wire3<FieldT, Private> {
     }
 }
 
+/// Arrays select elementwise — a bounded vector's slots.
+impl<V: Visibility, T: Select<V>, const N: usize> Select<V> for [T; N] {
+    fn select(c: &mut Circuit3, bit: Wire3<FieldT, V>, taken: Self, fallback: Self) -> Self {
+        let mut out = Vec::with_capacity(N);
+        for (a, b) in taken.into_iter().zip(fallback) {
+            out.push(T::select(c, bit, a, b));
+        }
+        match <[T; N]>::try_from(out) {
+            Ok(array) => array,
+            Err(_) => unreachable!("one selection per element"),
+        }
+    }
+}
+
+/// Tuples select componentwise — a fold's carried state is often a pair.
+macro_rules! select_tuples {
+    ($( ($($t:ident $i:tt),+) ),* $(,)?) => {$(
+        impl<V: Visibility, $($t: Select<V>),+> Select<V> for ($($t,)+) {
+            fn select(c: &mut Circuit3, bit: Wire3<FieldT, V>, a: Self, b: Self) -> Self {
+                ($( $t::select(c, bit, a.$i, b.$i), )+)
+            }
+        }
+    )*};
+}
+
+select_tuples! {
+    (A 0, B 1),
+    (A 0, B 1, C 2),
+    (A 0, B 1, C 2, D 3),
+}
+
 /// An if / else-if / else chain that produces a VALUE — see
 /// [`Circuit3::when_value`].
 /// Unfinished, it produces nothing — so leaving off `otherwise` is a warning

@@ -151,6 +151,37 @@ fn sum(c: &mut Circuit3, v: &[Uint<64>]) -> Uint<64> {
 }
 ```
 
+**Variable-length argument** — `Bounded<T, MAX>` is a length limb and a contiguous prefix; `NonEmpty<T, REST>` is a head plus a bounded tail, so "at least one" is a type, not an assert. The length is range-checked by the argument constraint (compactc's own table, at `Uint<0..MAX+1>`), and `fold` / `for_each` own the guard: a dead slot's ledger ops are skipped on chain and its step never reaches the carried state. Compact's circuits have only the fixed `Vector<N, T>`; variable length is hand-rolled as a vector plus a length or a `Maybe` per slot (the corpus's `Vector<5000, Maybe<…>>`), the ledger `List` cannot be iterated from a circuit, and non-emptiness is a runtime assert. Proof cost is `MAX` either way; the ledger applies `len` steps ([v3_vector.rs](crates/minocrab-std/tests/v3_vector.rs)).
+
+```compact
+circuit flush(keys: Vector<4, Maybe<Uint<64>>>): [] {
+  assert(keys[0].is_some, "empty flush");
+  for (const k of keys) {
+    if (k.is_some) { queue.remove(disclose(k.value)); }   // the select on any carried state is yours to write
+  }
+}
+```
+```rust
+#[circuit]
+fn flush(c: &mut Circuit3, keys: NonEmpty<Uint<64>, 3>) -> Discloses<(FlushKeys,)> {
+    let keys = keys.disclose_as::<FlushKeys>(c);
+    keys.for_each(c, |c, k| QUEUE.remove(c, k));            // guarded per slot, the head unconditionally
+    Discloses::new(())
+}
+```
+
+**Blind ledger update** — a ledger op that fetches a cell and stores or combines it *without* a `popeq` embeds no public input, so nothing a landed transaction changes can make it stale: `snapshot_into` copies a cell into a map entry the circuit never reads, `combine_blind` applies `Add`, `Max`, `Min`, `And`, `Or`, `Last` or `First` against a public delta, and a tuple state (`(Add, Max)` over `(nonce, last_seen)`) is one cell and one snapshot map per component. That is the accumulator behind a contention-free outbox (M41). Compact compiles every ledger read to a `popeq` except `Counter.increment`; it has no construct that moves a ledger value to another slot without reading it into the circuit (`m.insert(k, cell)` reads `cell` first) and no ledger-side compare-and-select (`Counter.lessThan` is a read). Gated on Midnight's on-chain VM, not on a compactc artifact ([v3_blind.rs](crates/minocrab-std/tests/v3_blind.rs)); five to twelve Impact ops, zero read rows.
+
+```compact
+// no equivalent: nonces.insert(k, nonce) reads `nonce` (a popeq) before it inserts,
+// so two calls proven against one state cannot both land
+```
+```rust
+NONCE.combine_blind(c, Add, &one);           // idxp; push 1; add; insc — no popeq
+NONCE.snapshot_into(c, &SNAPSHOT, &k);       // idxp; push k; dup 3; idx; ins 1; insc — no popeq
+SEEN.combine_blind(c, Max, &att.height);     // the kernel-mint compare-and-select, ledger side
+```
+
 **Assert** — the comparison width comes from the operand's type, never typed at the call site.
 
 ```compact
