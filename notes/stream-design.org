@@ -1,0 +1,433 @@
+Stream: insert out of order under your own key, sequence a chosen subset through a scanl over one shared cell, emit each element on its own. Generalises flush_design.org (nonce = step +1) and notes/nonce-admin.org §11's costing.
+
+* Shape
+
+Three circuits over three ledger pieces. Only =acc= is shared; every other op is per-key.
+
+#+begin_src rust
+/// K: the key a writer picks (a Uint<64,Public>, or a Poseidon of content+salt via `key_of`).
+/// H: the HEAD — what `step` may look at. `()` when sequencing needs nothing (indexing).
+/// B: the BODY — what only `emit` sees. Never read by `sequence`.
+/// S: the scanl state. Persisted; the cell's current value is the scanl's initial value.
+/// N: batch width of one `sequence`; fixes that proof's k (§11: N≤7 k=10, ≤15 k=11, ≤31 k=12).
+pub struct Stream<K, H, B, S, const N: usize> {
+    /// Insert phase, per-key. Split from `bodies` so `sequence` reads back only H limbs.
+    heads: LedgerMap<K, H>,
+    /// Payload, per-key. Written at insert, read at emit, untouched between.
+    bodies: LedgerMap<K, B>,
+    /// THE shared cell: one popeq and one write per `sequence`, nothing else touches it.
+    acc: LedgerCell<S>,
+    /// Sequenced and waiting: the head and the post-step state it was given.
+    staged: LedgerMap<K, Staged<H, S>>,
+}
+
+#[derive(LedgerRepr)]
+pub struct Staged<H, S> { pub head: H, pub state: S }
+
+impl<K, H, B, S, const N: usize> Stream<K, H, B, S, N>
+where K: LedgerRepr, H: LedgerRepr + Clone, B: LedgerRepr, S: LedgerRepr + Clone,
+{
+    /// INSERT. Per-key, no shared read. Rejects a key that is queued or staged;
+    /// `insert_unchecked` skips the two member checks when the key is a content hash and cannot collide.
+    pub fn insert(&self, c: &mut Circuit3, key: &K, head: &H, body: &B) {
+        let queued = self.heads.member(c, key);
+        let staged = self.staged.member(c, key);
+        c.assert(not(is_true(queued)).message("Stream key already queued"));
+        c.assert(not(is_true(staged)).message("Stream key already staged"));
+        self.insert_unchecked(c, key, head, body);
+    }
+    pub fn insert_unchecked(&self, c: &mut Circuit3, key: &K, head: &H, body: &B) {
+        self.heads.insert(c, key, head);
+        self.bodies.insert(c, key, body);
+    }
+
+    /// SEQUENCE: the scanl. `keys` is the flusher's choice of subset AND order, disclosed.
+    /// Reads `acc` once, folds `step` N times unrolled, stages each element with its post-step state,
+    /// writes `acc` once. Returns the final state. Fails as a proof (its popeq) if `acc` moved:
+    /// this is the one serialisation point, by design, and anyone may re-prove.
+    /// `step` sees only (S, &H): it cannot touch bodies or any other ledger field by construction.
+    pub fn sequence(
+        &self,
+        c: &mut Circuit3,
+        keys: [K; N],
+        mut step: impl FnMut(&mut Circuit3, S, &H) -> S,
+    ) -> S {
+        let mut s = self.acc.read(c);
+        for key in &keys {
+            let head = c.region("stream: pull", |c| {
+                let found = self.heads.member(c, key);
+                c.assert(is_true(found).message("Stream key not queued"));
+                let head = self.heads.lookup(c, key);   // elided when H = ()
+                self.heads.remove(c, key);
+                head
+            });
+            s = step(c, s, &head);
+            self.staged.insert(c, key, &Staged { head, state: s.clone() });
+        }
+        self.acc.write(c, &s);
+        s
+    }
+
+    /// EMIT: one element, one transaction, one shot. Takes the staged head+state and the body,
+    /// hands them to `f`. Per-key; the library promises nothing about what `f` itself touches.
+    /// (`for_each` was the Rust spelling of mapM_, rejected: this is one element per circuit.)
+    pub fn emit<T>(
+        &self,
+        c: &mut Circuit3,
+        key: &K,
+        f: impl FnOnce(&mut Circuit3, H, B, S) -> T,
+    ) -> T {
+        let found = self.staged.member(c, key);
+        c.assert(is_true(found).message("Stream key not staged"));
+        let Staged { head, state } = self.staged.lookup(c, key);
+        self.staged.remove(c, key);
+        let body = self.bodies.lookup(c, key);
+        self.bodies.remove(c, key);
+        f(c, head, body, state)
+    }
+}
+
+/// Content-derived key: Poseidon (`transient_hash`) over the body and a writer salt.
+/// Unsquattable, doubles as the handle the writer keeps. One hash at insert, which has no k pressure.
+pub fn key_of<B: CircuitBorsh<Public>>(c: &mut Circuit3, body: &B, salt: Uint<64, Public>) -> Field<Public> {
+    transient_hash(c, &(body, salt))
+}
+#+end_src
+
+* Wrappers for the common cases
+
+#+begin_src rust
+/// Indexing: heads are `()`, the state is a counter. This IS flush_design.org.
+pub type Indexed<K, B, const N: usize> = Stream<K, (), B, Uint<64, Public>, N>;
+impl<K, B, const N: usize> Indexed<K, B, N> {
+    pub fn push(&self, c: &mut Circuit3, key: &K, body: &B) { self.insert(c, key, &(), body) }
+    pub fn number(&self, c: &mut Circuit3, keys: [K; N]) -> Uint<64, Public> {
+        self.sequence(c, keys, |c, s, ()| s.add(c, 1))
+    }
+    /// `f` gets the body and its index.
+    pub fn take<T>(&self, c: &mut Circuit3, key: &K, f: impl FnOnce(&mut Circuit3, B, Uint<64, Public>) -> T) -> T {
+        self.emit(c, key, |c, (), body, i| f(c, body, i))
+    }
+}
+
+/// Running max over a u64 head. Plain code, no MAX datatype: a compare and a select per element.
+pub type RunningMax<K, B, const N: usize> = Stream<K, Uint<64, Public>, B, Uint<64, Public>, N>;
+impl<K, B, const N: usize> RunningMax<K, B, N> {
+    pub fn sequence_max(&self, c: &mut Circuit3, keys: [K; N]) -> Uint<64, Public> {
+        self.sequence(c, keys, |c, s, h| { let gt = h.gt(c, s); gt.select(c, h, s) })
+    }
+}
+
+/// Whole-value stream: no split, the body is the head. For small E where the split buys nothing.
+pub type Whole<K, E, S, const N: usize> = Stream<K, E, (), S, N>;
+#+end_src
+
+* Notes
+
+- Cost, from §11: the general sequence is ~30 + (17 + lookup(|H|) + remove + insert(|H|+|S|))·N rows; ~128/entry at |H|=7. Indexed elides the lookup and stages one limb, so well under that; to measure. Insert is compactc's 368 rows k=9 for one map; two maps plus two member checks is a bit more; with `key_of` the Poseidon likely lifts it to k=10. Emit's ledger share is ~one lookup+remove per map plus whatever `f` does.
+- Last flusher's advantage (dmd's Q1): whoever proved sequence k knows the post-state S_k before it lands, so can prove k+1 against it at once and submit the two back to back; everyone else waits for k to land (or reads it from the mempool). That is a one-proof-time head start (k=10–12: 0.1–0.5 s), no correctness effect: k+1 is valid only after k, and fails cleanly on `acc`'s popeq otherwise. With a trusted flusher it is a feature: pipeline proofs without waiting for finality.
+- `step` is unrolled N times, so it must be cheap: no hashing, no ledger, no cross-calls. The type (S, &H) -> S enforces the ledger part; cost is documentation and the row table.
+- Ordering is the flusher's. The library guarantees a total order exists (the cell serialises), not which one.
+- Emit is one shot: take-and-remove on both maps is the dedup. A settle path that outlives emit belongs in `f`, keyed by whatever `f` files.
+- Open: `LedgerRepr` for `()` (zero-limb lookup should emit nothing); K's visibility (map keys are disclosed); `insert` on a key still in `bodies` from a partial failure cannot happen (both maps move together in one circuit).
+
+* Author-level form (dmd, 2026-09-15) and assessment
+
+dmd's proposal: =stream(head_of_body, step, emit)= as three closures, with the stream's methods exposed through the contract's circuits so the insert wrapper can, e.g., verify an MPC attestation's signature first.
+
+Two changes. (1) Emit stays at the call site: it is the closure that touches the rest of the ledger (process_response reads Pending), so it must capture the contract, and hiding it in the declaration hides where the effects are; the stream's third method is =take(key) -> (Body, State)=. Step and head stay in the declaration, pure by signature. (2) Head is a projection of body computed in-circuit at insert, so =staged= holds State only, not (Head, State): the body is still on the ledger at emit and the head is recomputable.
+
+Feasibility: closures cannot live in a ledger struct (paths are const, assigned by the derive), but non-capturing closures coerce to fn pointers and a spec trait with associated types and two associated fns is the idiomatic carrier; the closure syntax is a =stream_spec!= macro over it, to add after the trait exists. A capturing closure fails to coerce, a compile error, as the house rule wants. =c= first in every closure is already how =Queued::insert='s env closure reads. N stays a const generic on =Stream= because an array length cannot come from an associated const on stable. Generic nested ledger structs are proven by =Queued<F, Env, WORDS, N>=. To check: a unit-typed map value should emit no lookup rows; the circuit-arg derive must accept =[Key; N]=.
+
+#+begin_src rust
+pub trait StreamSpec {
+    type Key: LedgerRepr; type Body: LedgerRepr; type Head: LedgerRepr; type State: LedgerRepr + Copy;
+    fn head(c: &mut Circuit3, body: &Self::Body) -> Self::Head;
+    fn step(c: &mut Circuit3, state: Self::State, head: &Self::Head) -> Self::State;
+}
+pub struct Stream<P: StreamSpec, const N: usize> {
+    heads: LedgerMap<P::Key, P::Head>, bodies: LedgerMap<P::Key, P::Body>,
+    acc: LedgerCell<P::State>, staged: LedgerMap<P::Key, P::State>,
+}
+impl<P: StreamSpec, const N: usize> Stream<P, N> {
+    pub fn insert(&self, c: &mut Circuit3, key: &P::Key, body: &P::Body);      // computes P::head
+    pub fn sequence(&self, c: &mut Circuit3, keys: [P::Key; N]) -> P::State;
+    pub fn take(&self, c: &mut Circuit3, key: &P::Key) -> (P::Body, P::State);
+}
+
+struct Attested;
+impl StreamSpec for Attested {
+    type Key = RequestId<Public>; type Body = Attestation; type Head = Uint<64, Public>; type State = Uint<64, Public>;
+    fn head(_c: &mut Circuit3, a: &Attestation) -> Uint<64, Public> { a.block_height }
+    fn step(c: &mut Circuit3, s: Uint<64, Public>, h: &Uint<64, Public>) -> Uint<64, Public> { max(c, s, *h) }
+}
+#[circuit] fn attest(&self, c: &mut Circuit3, att: Attestation, sig: Signature) {
+    verify(c, &att, &sig);
+    self.stream.insert(c, &att.request_id(c), &att);
+}
+#[circuit] fn sequence(&self, c: &mut Circuit3, keys: [RequestId<Public>; 4]) { self.stream.sequence(c, keys); }
+#[circuit] fn respond(&self, c: &mut Circuit3, key: RequestId<Public>) {
+    let (att, max_height) = self.stream.take(c, &key);
+    process_response(c, &self.pending, att, max_height);
+}
+#+end_src
+
+* Progress under contention (dmd's question, 2026-09-15)
+
+A sequence proof goes stale only because it popeq'd =acc= and a landed flush changed it. Progress per block is the change the landing flush made, so a one-key griefer flush is one step per block and one stale proof for everyone else. Three levers:
+
+1. One mandatory width N: every landing flush progresses N. A queue shorter than N is undetectable without a size read, which would make every insert contend with the flush. Escapes: an administrator-only short flush (the §5 unstick pattern) or a per-entry bounty paid at insert to the flusher. Not a bound.
+2. Lanes: M accumulators, lane by key hash or inserter choice. Holding every lane to one step costs the griefer M txs per block. Order is per lane: for indexing that is M index spaces (M signing keys each with a nonce); for max, a per-lane max, only equivalent if emit needs no global one.
+3. Blind scanl, no read at all. =LedgerCounter::increment= is already emitted as =idxp; addi; insc=, a ledger-side add with no popeq, which is why concurrent increments never conflict. The sequence transcript does, per key: =member heads[key]= and branch-to-fail (tx fails, not the proof); =rem heads[key]=; =dup; idx acc; ins staged[key]= (a COPY, never popeq'd); =idxp acc; addi 1; insc=. The circuit never learns =acc=, no proof is ever stale, every sequence in a block lands, order is by inclusion, and progress per block is the sum of all flushes. Emit reads =staged[key]= (never changes again, stable popeq) and adds the element's offset, which the circuit does know. Cost moves from the proof to the transcript: a few Impact ops per element, no head read-back.
+
+Caveats. Impact has =add=, =sub=, =lt=, so max/min are expressible ledger-side, but only for a step written in that small algebra, which is the special datatype dmd did not want, in disguise. Recommendation: =StreamSpec::step= stays real code with the popeq and the one-per-block worst case; an optional =BlindStep= trait carries the algebra (indexing implements it trivially), and a step outside it is a missing impl. To verify: placement of the member-and-fail branch in the fallible section; whether a ledger-side select needs =branch= or can be arithmetic; inserting an =idx='d stack value without popeq is how cell writes already work, so the copy itself is expected to be fine.
+
+* Lever 3 with monoidal steps (2026-09-15, supersedes the BlindStep algebra above)
+
+dmd rejected lever 1 (a one-element queue is the common case and must be low latency) and lever 2 (one key; nonce lanes maybe later). Lever 3 explained: the ledger executes each tx's transcript at inclusion; a read is a fetch plus a =popeq= equality check against the proof's public input, and that check is the only thing that goes stale. Fetch-and-store or fetch-add-immediate-store have no check and never go stale, which is why =Counter.increment= (=idxp; addi; insc=) never conflicts. The sequence tx touches =acc= only with ops of that kind, so the prover never learns it and nothing goes stale.
+
+Monoidal steps: if =step(s, h) = s ⊕ m(h)= with ⊕ associative and an identity, a batch's total Δ and per-element prefix deltas d_i fold from the identity in-circuit with real code (heads are per-key). The ledger applies ONE combine per batch, blind:
+
+#+begin_src text
+per element (ordinary, circuit-known writes):
+    assert heads.member(key); heads.remove(key)
+    staged[key] = (batch_id, d_i)
+per batch (two blind transcript ops):
+    batches[batch_id] = acc        ; fetch and store, no popeq
+    acc = acc ⊕ Δ                  ; fetch, combine with the public constant Δ, store
+emit: read staged[key] and batches[batch_id] (both stable), s_i = base ⊕ d_i in-circuit, body from bodies.
+#+end_src
+
+So the step is real Rust in the circuit, folding within the batch at sequence and finishing at emit; only ⊕ against a constant needs a ledger-side spelling, once per batch. Indexing: =addi=, exists. Max: CONFIRMED expressible; the kernel's mint path (=push amount; swap 0; neg; branch 4; …; add; insc=, minocrab-ledger/src/kernel.rs) is already a chain-resolved branch the circuit never sees, and the modeled ops include =Lt=, =Neg=, =Branch=, =Jmp=, =Dup=, =Swap=, =Pop=: =dup 0; idx [acc]; push Δ; dup 1; dup 1; lt; neg; branch 2; swap 0; pop; ins [acc]=. Min is the same with operands swapped. The practical blind set is add, max, min, boolean and/or, at the widths =lt= handles (at least u64, per =Counter.lessThan=). No =Mul= and no hash op, so a running product or hash chain is monoidal on paper but not blind-combinable; non-monoidal steps (threshold-replace, moving average, first-past-a-limit) likewise fall back to the popeq read and the one-step-per-block worst case.
+
+Still strictly sequenced, by the chain: batches apply in inclusion order and each gets =acc= as it stood. Monoidality removes the need to KNOW the position at prove time, not the order. Commutativity buys nothing more: the final =acc= would be order-free but the prefix states are the point.
+
+Consequences: N=1 flushes land immediately and stall nobody; one key, one accumulator; the griefer can only spend fees; the last-flusher advantage disappears. Batch id is flusher-chosen, guarded by a member check on a key nobody else uses.
+
+DSL needs: a blind cell-to-map-entry copy and a blind cell-combine-with-constant (add-immediate first, compare-select second), both transcript emission of the =Counter.increment= kind. To check: =ins= of a fetched stack value into a map (cell writes already =ins= a stack value). Impact's select spelling is settled above.
+
+* Same API on both paths (2026-09-15)
+
+The contract surface is unchanged between the blind and the popeq path: same three circuits, same emit closure, same head projection. The author picks a spec trait and a ledger type.
+
+#+begin_src rust
+pub trait MonoidSpec {                 // blind, contention-free
+    type Key; type Body; type Head;
+    type State: LedgerRepr + Copy;     // the monoid; acc is one element of it
+    fn head(c: &mut Circuit3, body: &Self::Body) -> Self::Head;
+    fn delta(c: &mut Circuit3, head: &Self::Head) -> Self::State;                  // m(h): 1 for indexing, the height for max
+    fn combine(c: &mut Circuit3, a: Self::State, b: Self::State) -> Self::State;   // real code, in-batch and at emit
+    const COMBINE: BlindCombine;                                                    // Add | Max | Min | And | Or: the ledger spelling
+}
+impl<P: MonoidSpec> StreamSpec for P { /* step(s, h) = combine(s, delta(h)) */ }
+pub struct Stream<P: MonoidSpec, const N: usize> { heads, bodies, acc, bases, staged }   // blind: bases[key] = acc, copied per element
+pub struct SerialStream<P: StreamSpec, const N: usize> { heads, bodies, acc, staged }     // popeq fallback for non-monoidal steps
+// identical on both:
+fn insert(&self, c: &mut Circuit3, key: &Key, body: &Body);
+fn sequence(&self, c: &mut Circuit3, keys: [Key; N]);          // returns nothing: the blind path cannot know the final state
+fn take(&self, c: &mut Circuit3, key: &Key) -> (Body, State);
+#+end_src
+
+Decisions: no batch id; the base is copied blind PER ELEMENT into =bases[key]= (N copies of a few transcript ops each, combine still once per batch), which removes the argument, the one-cell-per-batch leak, and lets =take= remove everything it read. A monoidal spec works on either type via the blanket impl, so switching is one ledger declaration; a non-monoidal step compiles only against =SerialStream= (missing impl). Blind is the default, serial the documented fallback. Cost difference an author sees: blind sequence has no acc read-back (cheaper proof, a little more transcript gas); take does two stable reads instead of one.
+
+* One API, Step and Primitive (2026-09-15, replaces MonoidSpec naming)
+
+Real Impact op set, from the onchain-vm the repo depends on (~/.cargo/git/checkouts/midnight-ledger-*/…/onchain-vm/src/ops.rs): Noop Lt Eq Type Size New And Or Neg Log Root Pop Popeq Addi Subi Push Branch Jmp Add Sub Concat Member Rem Dup Swap Idx Ins Ckpt. No multiply, no hash. Impact addresses whole cell values, not components of a struct in a cell, so a tuple state needs one cell per component.
+
+The property is the STEP's, not the stream's: =Step= is any step, =Primitive= is one the ledger executes, and =ContentionFree= is a marker on the stream that follows from =P::Step: Primitive=. One =Stream<P, N>= serves both; insert/sequence/take unchanged.
+
+#+begin_src rust
+pub trait StreamSpec {
+    type Key; type Body; type Head; type State;
+    type Step: Step<Self::State>;
+    fn head(c: &mut Circuit3, body: &Self::Body) -> Self::Head;
+    fn delta(c: &mut Circuit3, head: &Self::Head) -> <Self::Step as Step<Self::State>>::Delta;
+}
+pub trait Step<S> { type Delta; type Ledger<K>; const CONTENTION_FREE: bool; /* sequence, finish */ }
+pub trait Primitive<S>: Step<S, Delta = S> {
+    fn identity(c: &mut Circuit3) -> S;
+    fn combine(c: &mut Circuit3, a: S, b: S) -> S;                       // circuit spelling
+    fn combine_blind(acc: &LedgerCell<S>, delta: &S) -> Vec<ImpactOp>;   // ledger spelling
+}
+pub struct Serial<F>(PhantomData<F>);  pub trait Fold<D, S> { fn step(c: &mut Circuit3, s: S, d: D) -> S; }   // popeq fallback
+pub struct Stream<P: StreamSpec, const N: usize> { heads, bodies, acc, staged, extra: <P::Step as Step<_>>::Ledger<P::Key> }
+impl<P, const N: usize> ContentionFree for Stream<P, N> where P::Step: Primitive<P::State> {}
+#+end_src
+
+| Step  | State | Identity     | Ledger ops                                                                 | Note                                   |
+|-------+-------+--------------+----------------------------------------------------------------------------+----------------------------------------|
+| Add   | Uint  | 0            | =idxp; addi Δ; insc=                                                       | Counter.increment; overflow fails tx   |
+| Max   | Uint  | 0            | =dup 0; idx; push Δ; dup 1; dup 1; lt; neg; branch 2; swap 0; pop; ins=    | the kernel mint pattern                |
+| Min   | Uint  | MAX          | same, operands swapped                                                     |                                        |
+| And   | Bool  | true         | =dup 0; idx; push Δ; and; ins=                                             |                                        |
+| Or    | Bool  | false        | =dup 0; idx; push Δ; or; ins=                                              |                                        |
+| Last  | any   | first elem   | =push Δ; ins=                                                              | no fetch, pure overwrite               |
+| First | any   | first elem   | =idx flag; branch skip; ins value; push true; ins flag=                    | two-cell layout                        |
+Count = Add with delta 1. Sub is not associative. Concat is a monoid with an op but the cell is unbounded: out. No Mul/hash: no running product or hash chain.
+
+Tuples: =(A, B): Primitive<(SA, SB)>= when each component is; identity and combine componentwise in-circuit; on the ledger one acc cell and one bases map per component (a field path per blind op), laid out by the derive. Per element one blind copy per component, per batch one combine per component. sig-net attestation: =State = (Uint64, Uint64)=, =Step = (Add, Max)=, =delta = (1, height)=; take yields nonce and running max height together.
+
+Serial fallback: a unit struct implementing =Fold=, used as =Serial<Threshold>=; same stream, not ContentionFree, popeq read, one step per block worst case. The wrapper is for coherence (a type cannot be both a Primitive and a Fold).
+
+* sig-net inbox/outbox without the buffer or emit (2026-09-15)
+
+dmd's question, against ~/Documents/SigTransactionSpec.org (C1–C5, M2, O3, Appendix D): outgoing calls increment a nonce and snapshot last seen (C2); responses raise last seen (C3 step 4). With the accumulator =(Add, Max)= and blind ops, each caller sequences its own single element inside its own call tx and each response applies its max directly. No buffer, no batch flush, no emit. What is left of the stream is the accumulator and two ops: blind snapshot into a map entry, blind combine with a constant.
+
+#+begin_src text
+call(k, body):                             ; k = H(pre-record), the request id minus the nonce
+    assert !outstanding.member(k)          ; C1, on a key only this caller uses
+    bodies[k]   = body
+    snapshot[k] = acc                      ; C2, blind copy of (nonce, last_seen)
+    acc ⊕= (1, 0)                          ; blind addi on the nonce cell; the call's nonce is the snapshot value
+respond(k, attestation):
+    verify(attestation over k, kind, height, payload)
+    assert outstanding.member(k)
+    (nonce, seen) = snapshot[k]            ; stable popeq: written once at call
+    assert height > seen                   ; C3
+    acc ⊕= (0, height)                     ; blind max on the last-seen cell
+    remove bodies[k], snapshot[k]          ; C4
+    callback(body, kind, payload)
+#+end_src
+
+Nothing popeqs the shared cells, so calls, responses and mixed traffic all land in one block; C5's one-tx-per-proving-time is gone. The MPC reads the nonce from the landed snapshot (public state; O3 holds).
+
+Condition: the request id must EXCLUDE the nonce. Appendix D's Midnight id is a Poseidon hash over the whole event record, nonce included; Impact has no hash op, so an id over the assigned nonce needs a circuit that read it, i.e. an emit. Keeping that id gives call + a separate contention-free emit per request (hash and notify): still no buffer or batch, but two txs per call. Cost of changing the id: two calls with the same pre-record share an id, so the second is refused while the first is in flight and accepted after, which is C1's stated behaviour for byte-identical payloads (the caller cannot vary the nonce anyway); state it in the spec. The MPC's request-to-transaction-id mapping gains one ledger read.
+
+For the library: build the accumulator primitives first (this contract needs exactly them); the stream is a later composition over the same ops, earning its keep only when the flusher is not the inserter or the step is not primitive.
+
+* Keeping the API uniform when the flush is fused (2026-09-15)
+
+In the primitive self-sequenced case the flush is fused into insert (the inserter flushes a one-element batch); take remains the post-process everywhere. Options: (1) sequence absent on primitive streams by trait bound: simplest, but the contract differs by mode and loses primitive-with-external-order (an operator choosing which requests go out). (2) Keep all three everywhere, fuse at the call site (=insert; sequence([k])= in one circuit): identical author code, one wasted head round trip unless a fused convenience exists. (3) RECOMMENDED: two orthogonal knobs, =Step= (Primitive or =Serial<F>=) and =Sequencing= (=SelfSequenced= or =Flushed<N>=); N moves onto the sequencing knob, =ContentionFree= depends on the step alone.
+
+#+begin_src rust
+pub trait StreamSpec {
+    type Key; type Body; type Head; type State;
+    type Step: Step<Self::State>;
+    type Sequencing: Sequencing;                  // SelfSequenced | Flushed<N>
+    fn head(c: &mut Circuit3, body: &Self::Body) -> Self::Head;
+    fn delta(c: &mut Circuit3, head: &Self::Head) -> Delta;
+}
+fn insert(&self, c: &mut Circuit3, key: &Key, body: &Body);      // sequences too when SelfSequenced
+fn take(&self, c: &mut Circuit3, key: &Key) -> (Body, State);    // always
+fn sequence(&self, c: &mut Circuit3, keys: [Key; N]);            // only when Flushed<N>
+#+end_src
+
+| Step      | Sequencing    | Insert does                    | Contention   | Layout beyond acc and bodies    |
+|-----------+---------------+--------------------------------+--------------+---------------------------------|
+| Primitive | SelfSequenced | snapshot, blind combine        | none         | snapshot                        |
+| Primitive | Flushed       | pure insert                    | none         | heads, snapshot, staged deltas  |
+| Serial    | SelfSequenced | popeq read, step, write        | every insert | staged state                    |
+| Serial    | Flushed       | pure insert                    | the flush    | heads, staged state             |
+sig-net is row one: take reads the snapshot and recomputes the element's delta from the body via =head= and =delta=, so no staged map; the layout is exactly the previous section's. Row two needs staged deltas because a prefix within a batch depends on its neighbours. Attached state is post-step (=base ⊕ delta=) in every row, the scanl-tail convention. The only author-visible difference between rows is whether a sequence circuit exists.
+
+* DECIDED: option one, the two streams side by side (2026-09-15)
+
+dmd chose option one: sequence exists only on serial streams; a primitive stream's insert sequences itself. Convention fixed here: the snapshot is taken AFTER the combine, so the stored state is the post-step value and take just reads it; the nonce cell holds the last assigned nonce, a call's nonce is one more, and the MPC reads it off the ledger. The flushed serial stream stores states too, so neither stream has a deltas map. =combine(Δ)= applies a delta with no element (the response's max); on a serial stream it is a popeq read, step, write.
+
+#+begin_src rust
+// PRIMITIVE: the sig-net outbox
+struct Outbox;
+impl StreamSpec for Outbox {
+    type Key = RequestId<Public>;                        // H(pre-record), nonce excluded
+    type Body = PreRecord<WORDS>;
+    type Head = ();                                      // the delta needs nothing from the body
+    type State = (Uint<64, Public>, Uint<64, Public>);   // (last nonce, last seen)
+    type Step = (Add, Max);                              // primitive: no sequence circuit exists
+    fn head(_c: &mut Circuit3, _b: &PreRecord<WORDS>) {}
+    fn delta(c: &mut Circuit3, _h: &()) -> Self::State { (one(c), zero(c)) }
+}
+#[circuit] fn call(&self, c: &mut Circuit3, pre: PreRecord<WORDS>) {
+    let k = pre.request_id(c);
+    self.outbox.insert(c, &k, &pre);
+}
+#[circuit] fn respond(&self, c: &mut Circuit3, k: RequestId<Public>, att: Attestation) {
+    verify(c, &k, &att);
+    let (pre, (nonce, seen)) = self.outbox.take(c, &k);
+    c.assert(is_true(att.height.gt(c, seen)).message("response not after call"));   // C3
+    self.outbox.combine(c, (zero(c), att.height));       // blind max, no element
+    callback(c, pre, att);
+}
+
+// SERIAL: a fee estimate that is not a monoid
+struct FeeEma;
+impl StreamSpec for FeeEma {
+    type Key = RequestId<Public>; type Body = Report; type Head = Uint<64, Public>; type State = Uint<64, Public>;
+    type Step = Serial<Ema, 4>;                          // serial: sequence exists, width 4
+    fn head(_c: &mut Circuit3, r: &Report) -> Uint<64, Public> { r.gas_used }
+    fn delta(_c: &mut Circuit3, h: &Uint<64, Public>) -> Uint<64, Public> { *h }
+}
+struct Ema;
+impl Fold<Uint<64, Public>, Uint<64, Public>> for Ema {
+    fn step(c: &mut Circuit3, s: Uint<64, Public>, d: Uint<64, Public>) -> Uint<64, Public> { s.mul_const(c, 7).add(c, d).shr(c, 3) }
+}
+#[circuit] fn report(&self, c: &mut Circuit3, r: Report) { self.fees.insert(c, &r.id(c), &r); }
+#[circuit] fn sequence(&self, c: &mut Circuit3, keys: [RequestId<Public>; 4]) { self.fees.sequence(c, keys); }
+#[circuit] fn settle(&self, c: &mut Circuit3, k: RequestId<Public>) { let (r, ema) = self.fees.take(c, &k); /* … */ }
+#+end_src
+
+| Method     | Primitive                                                                                  | Serial                                                                                                   |
+|------------+--------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------|
+| insert     | assert not member; bodies[k] = body; per component: blind acc ⊕= Δ, then blind snapshot[k] = acc | assert not member; heads[k] = head(body); bodies[k] = body                                          |
+| sequence   | does not exist                                                                             | popeq acc; per key: assert member, lookup+remove head, s = step(s, delta(head)), staged[k] = s; write acc |
+| take       | lookup+remove snapshot[k] per component and bodies[k]                                      | lookup+remove staged[k] and bodies[k]                                                                    |
+| combine(Δ) | blind combine per component                                                                | popeq acc, step, write                                                                                   |
+| ledger     | bodies; one acc cell and one snapshot map per component                                    | heads, bodies, acc, staged                                                                               |
+| contention | none                                                                                       | sequence and combine, on acc                                                                             |
+Author-visible differences: the step type, and whether a sequence circuit exists. Insert, take and combine have the same signatures on both.
+
+Left for dmd: (1) the request id excludes the nonce (changes Appendix D's Midnight id; identical in-flight pre-records collide under C1; keeping the nonce in the id adds one contention-free emit circuit per request and nothing else). (2) Where the blind ops live: the snapshot and combine emitters are ledger primitives of the =Counter.increment= family, so minocrab-std's ledger module, with the stream in minocrab-contracts; build and cost the two ops first, the blind copy into a map entry being the one thing nobody has emitted yet.
+
+* Short flushes, emit restored, blind ops in std (2026-09-15)
+
+Short flushes: =sequence= takes =[Maybe<Key>; N]= and guards each iteration with =c.when(live, …)=, whose ambient guard makes every Impact instruction inside conditional (minocrab-ledger/src/reads.rs, =emit=), so None slots are skipped on the ledger without failing the tx. The step is computed every iteration and applied by select only when live; =staged[k]= is inserted under the guard; an all-None flush is rejected (a flush must move acc). Proof cost is the full N (rows and k) whatever the count; the ledger applies 1..=N steps. The step must be total on the default head (dead slots evaluate it and discard).
+
+#+begin_src rust
+fn sequence(&self, c: &mut Circuit3, keys: [Maybe<Key>; N]) {
+    let mut s = self.acc.read(c);
+    let mut any = false_(c);
+    for slot in keys {
+        let live = slot.is_some(c);
+        any = any.or(c, live);
+        let h = c.when(live, |c| { assert member; let h = heads.lookup(&slot.value); heads.remove(&slot.value); h });
+        let next = F::step(c, s, P::delta(c, &h));
+        s = live.select(c, next, s);
+        c.when(live, |c| self.staged.insert(c, &slot.value, &s));
+    }
+    c.assert(is_true(any).message("empty flush"));
+    self.acc.write(c, &s);
+}
+#+end_src
+
+Emit restored (dmd: the request id IS computed in the emit step): the primitive stream keys on the pre-record's handle, the outstanding set on the request id, the §4 split. =call= inserts (blind). =emit(handle)= takes (two stable reads), builds the tx with the nonce, files the record (hash, request id, MPC notification) and inserts =outstanding[id] = (env, seen)=, so C2's snapshot travels with the record. =respond(id, att)= verifies, takes =outstanding[id]=, asserts =height > seen= (C3), blind-max-combines last seen, runs the callback. All three contention-free; emit is per request and permissionless with nothing to go stale. Identical pre-records now collide only between call and emit, since the outstanding set is keyed by an id that includes the nonce.
+
+Blind ops live in minocrab-std's v3 ledger module beside =LedgerCounter::increment=: a cell-to-map-entry snapshot and a cell-combine-with-constant per primitive (Add, Max, Min, And, Or, Last, First).
+
+DECIDED (dmd, 2026-09-15): keys are optional, and at least one is always present. Typed rather than asserted: =sequence(c, first: Key, rest: [Maybe<Key>; N])=, width N + 1, so an all-None flush is unexpressible, the =any= accumulator and its assert go, and the first iteration runs unguarded. The width parameter counts the OPTIONAL slots (=Serial<Ema, 3>= flushes one to four) because an array of length N − 1 is not expressible on stable.
+
+* Bounded and NonEmpty (2026-09-15)
+
+Worth defining, as length + contiguous prefix rather than per-slot Maybe: one length limb instead of N tags, no holes, live wire for slot i is a compare against the constant i; Compact has no variable-length vector at all. =Bounded<T, MAX> { len: Uint<8, Public>, slots: [T; MAX] }= with =fold= and =for_each= that own the =when= guard and the select, so authors never hand-roll it. =NonEmpty<T, REST> { head: T, tail: Bounded<T, REST> }=: the head is structural, the fold runs it unguarded then the tail; REST counts the optional slots (documented once on the type). Witness-side constructor pads a Vec of length 1..=REST+1 with defaults; the length limb is range-checked against MAX in-circuit. Circuit-arg derive sees a struct of a limb and an array, nothing new. The flush becomes =keys.fold(c, acc.read(c), |c, s, k| { lookup, remove, step, staged.insert; s })= then =acc.write=. About a hundred lines plus a test.
+
+Iteration over Bounded/NonEmpty: =fold= and =for_each= (internal iteration) are the primary interface because only they can apply the guard to BOTH ledger ops and carried state; a =for= loop runs its body between =next= calls, so an iterator can push a =when= scope in =next= (ambient guard) but cannot insert the select on state assigned in the body, and a for-loop fold would silently apply dead steps. Provide =iter()= yielding =(live, &T)= for pure wire computations (hashing all slots, digests), documented as no ledger ops and no carried state without the author's own select; ordinary =IntoIterator= on the witness-side Vec. The scoped-=next= trick is not built: it only covers effect-only bodies and the unsafe case is invisible at the call site.
+
+* Can Compact write the nonce + last-seen pattern today? (2026-09-15)
+
+No. Compact compiles every ledger read to a =popeq= except =Counter.increment= (and =decrement=), which is the one blind op it has. The outbox needs two more: a blind SNAPSHOT (copy the accumulator into the caller's map entry without the circuit learning it) and a blind MAX (raise last seen from a response). Compact has no construct that moves a ledger value to another ledger slot without reading it into the circuit first (=map.insert(k, cell)= is a read of =cell= then an insert of the circuit value), and no ledger-side compare-and-select (=Counter.lessThan= is a read: =lt= then =popeqc=). Nested ADTs let a =Map<K, Counter>= increment per key blind, but nothing copies a global counter into a per-key slot. So in Compact the nonce can be incremented blind but the caller cannot learn or attach its nonce without a read, and last seen cannot be raised without a read: either a =popeq= on a shared cell (one transaction per proving time, the spec's C5 problem) or caller-chosen positions (the race M39 was filed to remove). This is checkable on any Compact contract with =tools/compact-reads.py=, the audit of sig-net PRs 58/59/61/62 in nonce-admin.org §10.1. README tasks: M40 D, M41 E.
+
+* A compactc PR for the two blind ops? (2026-09-15)
+
+Feasible and small. Compact's ledger ADTs are a table: =corpus/src/compact/compiler/midnight-ledger.ss=, one =declare-ledger-adt= per ADT with an initial state value and functions of (kind, name, typed args, doc, literal Impact op list); =Counter.increment= is six lines. Counter appears in one other compiler file (=extract-contract-info.ss=) and nowhere in the TS runtime. =branch=, =jmp= and =concat= are already used by Kernel and =List.head= entries; the reach-back =dup= to fetch a sibling from inside a pushed path is =Map.insertCoin='s. No ZKIR change: an update with no popeq emits no public input, as increment. Blind max fits on Counter as =raiseTo(threshold)= (=idx pushPath; push t; dup 1; dup 1; lt; neg; branch 3; swap 0; pop; jmp 1; pop; ins n=). The snapshot copies one field into another and Compact cannot pass a ledger field as an argument, so it needs a COMPOUND ADT owning both, as List/MerkleTree own several slots: =Sequenced<K>= = [counter cell, map], =insert(key)= (idx map pushPath; push key; reach-back dup; idx counter; ins 1; ins n; then increment), =lookup= (popeq, stable), =member=, =remove=; a two-field snapshot builds the entry with =concat=. Sixty to a hundred lines, a test contract, a reference entry. Costs in practice: a fork means building the Chez compiler (the repo pins a binary from nix; heavyweight packaging is avoided) or waiting for upstream; a new ADT bumps the language version. Payoff: M40 A gets a PI-equality gate, the outbox becomes a compat port. Tuples, Bounded, NonEmpty and the serial guarded fold stay MinoCrab-only. Filed as M40 E, optional.
+
+CORRECTION (dmd, 2026-09-15): the tuple needs nothing in the compiler. One =Stamped<K>= field per component in the contract, with copy and combine as separate ADT methods (=stamp(key)=, =increment=, =raiseTo=, =lookup=, =member=, =remove=): =nonces.insert(k); seen.stamp(k)= at call, =seen.raiseTo(h)= at respond. No concat-built two-field entry, no standalone =Counter.raiseTo=; emit reads two stable entries, as MinoCrab's per-component layout does. The PR is one ADT with six methods.
+
+* The compactc PR, as built (2026-09-15)
+
+Branch =stamped-counter= in the clone at ~/compact (upstream https://github.com/LFDT-Minokawa/compact, cloned at c47230c, 2026-09-09), commit e480451, NOT pushed: pushing and opening the PR is dmd's. 569 lines over nine files. =compiler/midnight-ledger.ss=: =Counter.raiseTo(threshold)= and a new =StampedCounter<key_type>= ADT, initial value =[cell (align 0 8), map]=, with =value= (read), =lookup=, =member= (reads), =stamp=, =increment=, =decrement=, =raiseTo= (updates), =remove=, =resetToDefault=, plus a =js-only iter=. =extract-contract-info.ss=: the serialize-adt case. =doc/ledger-adt.mdx=: REGENERATED by the build (the macro writes it at expansion; the hand-written draft matched it line for line except the two TS-availability notes). =CHANGELOG.md=: an Unreleased entry. Tests: =examples/adt/tests/stamped_counter.compact= (asserts), =examples/adt/exports/stamped_counter.compact= (one circuit per op), =test-center/compact/stamped-counter.compact= + =test-center/ts/stamped-counter.ts= wired into =compiler/test.ss= (an outbox: call = stamp nonces, increment, stamp seen; respond = member assert, raiseTo, remove both).
+
+Two things learned building it. (1) An ADT with an op named =read= exposes ONLY that value to TypeScript (=has-read?= in print-typescript.ss and =read-ops= in ledger.ss short-circuit to the getter), which would hide =lookup= from the MPC; hence =value()= not =read()=, and the generated =Ledger= type is =s: { value(): bigint; lookup(key): bigint; member(key): boolean; [Symbol.iterator]() }=. (2) A constant pushed with =[storage #f]= is a WEAK value and the runtime refuses to persist it ("result state is was weak, and cannot be persisted"); the threshold in =raiseTo= is written when it wins, so it is pushed with =[storage #t]=, as =Map.insert= pushes its value. The stamp copies a value fetched by =idx=, which is strong, so it needed nothing.
+
+Stack discipline used (from the table's own comments and onchain-vm =vm.rs=): =idx pushPath #t path f= leaves (container, key) pairs and the value; =ins n= pops the value then n (key, container) pairs; sub-slots of the array are reached with a second =idx [path (list (align i 1))]= and written back with =push (align i 1); swap 0; ins [cached #t] [n 1]= (List.pushFront's idiom); =lt= computes below-top < top; =branch skip= pops and skips when non-empty; a sibling slot is fetched from inside the pushed path by =dup= then =idx= (Map.insertCoin's reach-back).
+
+Gates run: the compiler built from source under plain Chez 10.4.1 from nixpkgs with the flake's pinned nanopass and rough-draft (the repo's own devshells fail here: the default one on a crates.io mirror 403, the compiler one works but has no test-center node_modules), and compiled all three contracts with =--skip-zk=. The test-center TS test ran in the REAL runtime 0.19.101 with its on-chain VM (WASM), via a copy of =startContract= minus the proof checks (the zkir packages are not in this scratch env): both tests pass, including the assertion that =call='s and =raisePlain='s public transcripts contain no =popeq=. Added after the first run and also passing: the TypeScript =ledger()= accessor's =value=, =lookup=, =member= and the hand-written =iter= over the stamps. Commit amended to 73bda5d; PR body drafted at ~/compact-pr-stamped-counter.md. NOT run: the proof-checked variant the suite does through =flushProofChecks=, the e2e compile tests, and =./compiler/go= in full (launched in the background at the end; CONTRIBUTING requires it green before a PR). Not done: a language-version bump, which the unshielded-token precedent did and is the maintainers' call.
+
+For MinoCrab: this is the PI-equality target for M40 A. =nonces: StampedCounter<K>; seen: StampedCounter<K>= with =nonces.stamp(k); nonces.increment(1); seen.stamp(k)= at call and =seen.raiseTo(h)= at respond is the outbox with no emit, and the compat port of it is a row-snapshot away.

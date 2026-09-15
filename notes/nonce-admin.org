@@ -623,3 +623,77 @@ The audit as a shareable document: https://claude.ai/code/artifact/5febe6ea-df65
 (private until shared from its page). The PR heads are checked out at
 ~/midnight-examples-pr{58,59,61,62}; recompile with =compactc --skip-zk
 --feature-zkir-v3= and =COMPACT_PATH= at ~/midnight-examples/node_modules.
+
+* 11. flush_design.org's two-phase flush, costed (2026-09-09)
+dmd's sketch (=flush_design.org=, untracked): =push= inserts a
+nonce-less request under a requester-chosen =u64=; =flush(numbers)=
+TAKES each from =Uncooked=, assigns =NONCE++=, and INSERTS into
+=WithNonce=; =send_request(n)= takes from =WithNonce= and does the
+=signBidirectional=. So the flush carries NO record hash and NO
+cross-call — those move to =send_request=, one per transaction — and
+the flush is pure ledger traffic. Measured, not estimated, on both
+toolchains with the same 7-limb entry as §8's =QueueEntry<HandleOwned<
+Amount>, 2>= (callee, key version, two words, owner, handle, amount)
+and an 8-limb =(entry, nonce)= value:
+
+| N  | minocrab rows |  k | compactc 0.34 rows |  k |
+|----+---------------+----+--------------------+----|
+|  1 |           158 |  8 |                168 |  8 |
+|  2 |           296 |  9 |                317 |  9 |
+|  4 |           552 | 10 |                595 | 10 |
+|  8 |          1064 | 11 |               1151 | 11 |
+| 16 |          2088 | 12 |               2263 | 12 |
+Affine: minocrab ≈ 30 + 128·N rows (24 + 18·N Impact, 1 + 11·N public
+inputs: the key, 7 entry limbs read back, 8 written); compactc ≈ 30 +
+139·N. Per entry, that is member+assert (17 rows — dropping it, as a
+bare Compact =lookup= would, gives 111/entry), lookup, remove, one
+add for the nonce, insert. Nonce style barely matters: the sketch's
+literal per-entry =NONCE++= (read + increment per entry) is 599 vs 552
+at N=4 in minocrab and 575 vs 595 in compactc (its cast is dearer than
+its popeq). No witnesses, no digests. compactc's =push= (insert only,
+no commitment) is 368 rows k=9.
+
+k against N, either toolchain: N ≤ 7 → k=10, N ≤ 15 → k=11, N ≤ 31 →
+k=12, N ≤ 63 → k=13, N ≤ 127 → k=14, N ≤ 255 → k=15. PER TRANSACTION
+the flush's share is ~130-140 rows whatever N is; the batch width only
+moves the flush proof's own k. Compare §8's =Queued::flush=, which
+hashes and notifies per entry: 927 rows/entry, i.e. the two-phase
+split moves ~800 rows/entry out of the flush and into =send_request=,
+where it is the same ~1k rows (k=10) our =respond= lineage pays, or
+~40k (k=16) if written in Compact (benchmark.org: compactc explodes
+the ABI words to bytes on the hash path).
+
+Prove time and RSS by k (benchmark.org, Apple Silicon, median-of-3,
+one proof): k=10 0.11 s / 44 MB; k=11 0.17 s / 53 MB; k=13 2.3-2.6 s
+/ 170 MB; k=14 2.9 s / 316 MB; k=15 4.4-10 s / 440-780 MB; k=16
+17-22 s / 1.6-1.85 GB; k=17 35-45 s / 3.2 GB. (k=12 unmeasured —
+interpolate ~0.3-0.5 s / ~100 MB.) Nothing below k=10 has been proven
+in this repo, so treat k=10 as the practical floor for the flush.
+
+Method: a scratch =tests/scratch_flush_cost.rs= (deleted; ~100 lines:
+=LedgerMap<Uint<64,Public>, QueueEntry<…>>= ×2 plus a =LedgerCounter=,
+=minocrab_sim::v3::cost=) and this Compact, compiled =compactc
+--skip-zk --feature-zkir-v3= with =COMPACT_PATH= at
+~/midnight-examples/node_modules, rows via =read_zkir(…).model()=:
+#+begin_src compact
+pragma language_version >= 0.16;
+import CompactStandardLibrary;
+struct Entry { callee: Bytes<20>; keyVersion: Uint<8>; w0: Uint<128>; w1: Uint<128>;
+               owner: Bytes<32>; handle: Uint<64>; amount: Uint<64>; }
+struct Cooked { entry: Entry; nonce: Uint<64>; }
+export ledger uncooked: Map<Uint<64>, Entry>;
+export ledger withNonce: Map<Uint<64>, Cooked>;
+export ledger nonce: Counter;
+circuit flushA<#N>(numbers: Vector<N, Uint<64>>): [] {
+  const base = nonce as Uint<64>;
+  for (const i of 0..N) {
+    const n = disclose(numbers[i]);
+    assert(uncooked.member(n), "not queued");
+    const e = uncooked.lookup(n);
+    uncooked.remove(n);
+    withNonce.insert(n, Cooked { entry: e, nonce: (base + i + 1) as Uint<64> });
+  }
+  nonce.increment(N);
+}
+export circuit flushA4(numbers: Vector<4, Uint<64>>): [] { flushA<4>(numbers); }
+#+end_src
