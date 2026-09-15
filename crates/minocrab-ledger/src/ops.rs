@@ -914,3 +914,171 @@ pub fn emit_event(version: u32, tag: u8, payload: &LedgerValue) -> Vec<ImpactOp>
     elems.extend(payload.elems.iter().copied());
     vec![ImpactOp(elems), ImpactOp::constant(&Op::Log)]
 }
+
+// --- BLIND OPS (M40, notes/stream-design.org) --------------------------------
+//
+// A ledger op that fetches a cell and stores or combines it WITHOUT a
+// `popeq` never goes stale: the chain executes it at inclusion against
+// whatever the cell holds then, and the circuit embeds no public input for
+// it. `Counter.increment` (`idxp; addi; insc`) is the one such op Compact
+// has. These are the rest of the family the on-chain VM can express with
+// its real op set (Lt Neg And Or Add Branch Jmp Dup Swap Pop Idx Ins): a
+// blind SNAPSHOT of a cell into a map entry, and a blind COMBINE of a cell
+// with a public constant under add, max, min, and, or, and first-write.
+//
+// None of these is expressible in Compact, so there is no compactc
+// differential; the gate is the on-chain VM itself
+// (minocrab-std/tests/v3_blind.rs runs every transcript through
+// `midnight_onchain_vm::vm::run_program` on a seeded state).
+//
+// Stack discipline, from onchain-vm `vm.rs`: `idxp f` leaves the `(container,
+// key)` pairs of the walk and then the value, so after `idxp f` the state
+// sits `2·len(f) − 1` below the top; `ins n` pops the value then `n` pairs;
+// `lt` pops `b` then `a` and pushes `a < b`; `branch k` pops a Boolean cell
+// and skips `k` ops when it is TRUE; `dup n` copies the element `n` below the
+// top; `swap n` exchanges the top with the element `n + 1` below it. A value
+// pushed with `push` (storage = false) is WEAK and the runtime refuses to
+// persist it, so a constant that may be WRITTEN goes in with `pushs`.
+
+/// The blind SNAPSHOT: `map[key] = cell`, the circuit never learning the
+/// value. `idxp m; push key; dup 2·len(m)+1; idx c; ins 1; insc len(m)`.
+///
+/// The `dup` is `Map.insertCoin`'s reach-back (midnight-ledger.ss:769-795):
+/// after `idxp m; push key` the state is `2·len(m) + 1` below the top, so a
+/// copy of it, indexed by the cell's path, is the value the insert takes.
+/// The value an `idx` fetches is as strong as the state it came from, so it
+/// persists (the compactc `StampedCounter.stamp` port learned this the hard
+/// way — notes/stream-design.org, "as built").
+pub fn cell_snapshot_into_map_at(
+    cell: &[LedgerKey],
+    map: &[LedgerKey],
+    key: &LedgerValue,
+) -> Vec<ImpactOp> {
+    let reach = 2 * map.len() + 1;
+    assert!(
+        reach <= 15,
+        "cell_snapshot_into_map_at: a map path of {} elements puts the state \
+         {reach} deep, past the `dup` nibble",
+        map.len()
+    );
+    vec![
+        idx_path(false, true, map),
+        push_cell(false, key),
+        dup(reach as u8),
+        idx_path(false, false, cell),
+        ins1(),
+        insc(map.len()),
+    ]
+}
+
+/// The blind ADD: `cell = cell + delta` on a `Uint<64>` cell, `delta` a
+/// public circuit value: `idxp f; push delta; add; insc len(f)`.
+///
+/// `Counter.increment`'s `addi` takes a LITERAL (an op immediate); a delta
+/// the circuit computes goes through `push` + `add`, one op more. Both
+/// overflow-check on chain (`vm.rs` `add`: `checked_add`, the transaction
+/// fails), and neither embeds a public input.
+pub fn cell_add_at(path: &[LedgerKey], delta: &LedgerValue) -> Vec<ImpactOp> {
+    vec![
+        idx_path(false, true, path),
+        push_cell(false, delta),
+        ImpactOp::constant(&Op::Add),
+        insc(path.len()),
+    ]
+}
+
+/// The blind MAX: `cell = max(cell, delta)` on a `Uint<64>` cell, the
+/// kernel-mint / compactc `Counter.raiseTo` pattern:
+///
+/// ```text
+/// idxp f; pushs Δ; dup 1; dup 1; lt; neg; branch 3; swap 0; pop; jmp 1; pop; insc len(f)
+/// ```
+///
+/// With `[cur, Δ]` on the stack, `lt` leaves `cur < Δ`, `neg` inverts it,
+/// and `branch 3` skips the Δ-wins arm (`swap 0; pop; jmp 1`, leaving `Δ`)
+/// when the current value is at least Δ, landing on the cur-wins arm
+/// (`pop`, leaving `cur`). The `jmp 1` is what makes the two arms exclusive;
+/// a `branch 2` without it would write Δ on both paths. Δ is `pushs` because
+/// on its winning path it is what gets persisted.
+pub fn cell_max_at(path: &[LedgerKey], delta: &LedgerValue) -> Vec<ImpactOp> {
+    cell_extremum_at(path, delta, true)
+}
+
+/// The blind MIN: [`cell_max_at`] without the `neg`, so the Δ-wins arm runs
+/// when `cur < Δ` is FALSE, i.e. when Δ is the smaller.
+pub fn cell_min_at(path: &[LedgerKey], delta: &LedgerValue) -> Vec<ImpactOp> {
+    cell_extremum_at(path, delta, false)
+}
+
+fn cell_extremum_at(path: &[LedgerKey], delta: &LedgerValue, max: bool) -> Vec<ImpactOp> {
+    let mut ops = vec![
+        idx_path(false, true, path),
+        push_cell(true, delta),
+        dup(1),
+        dup(1),
+        ImpactOp::constant(&Op::Lt),
+    ];
+    if max {
+        ops.push(ImpactOp::constant(&Op::Neg));
+    }
+    ops.extend([
+        ImpactOp::constant(&Op::Branch { skip: 3 }),
+        ImpactOp::constant(&Op::Swap { n: 0 }),
+        ImpactOp::constant(&Op::Pop),
+        ImpactOp::constant(&Op::Jmp { skip: 1 }),
+        ImpactOp::constant(&Op::Pop),
+        insc(path.len()),
+    ]);
+    ops
+}
+
+/// The blind AND: `cell = cell && delta` on a `Boolean` cell:
+/// `idxp f; push delta; and; insc len(f)`.
+pub fn cell_and_at(path: &[LedgerKey], delta: &LedgerValue) -> Vec<ImpactOp> {
+    cell_boolean_at(path, delta, Op::And)
+}
+
+/// The blind OR: `cell = cell || delta` on a `Boolean` cell:
+/// `idxp f; push delta; or; insc len(f)`.
+pub fn cell_or_at(path: &[LedgerKey], delta: &LedgerValue) -> Vec<ImpactOp> {
+    cell_boolean_at(path, delta, Op::Or)
+}
+
+fn cell_boolean_at(path: &[LedgerKey], delta: &LedgerValue, op: VmOp) -> Vec<ImpactOp> {
+    vec![
+        idx_path(false, true, path),
+        push_cell(false, delta),
+        ImpactOp::constant(&op),
+        insc(path.len()),
+    ]
+}
+
+/// The blind FIRST-WRITE: `if !flag { value_cell = value; flag = true }`,
+/// the two-cell layout of a `First` accumulator:
+///
+/// ```text
+/// dup 0; idx flag; branch k; <cell_write_at value>; <cell_write_at flag = true>
+/// ```
+///
+/// `branch k` pops the flag and skips both writes (`k` ops) when it is
+/// already set. Either write is [`cell_write_at`]'s three or five
+/// instructions, so `k` is their sum and is computed, not assumed.
+pub fn cell_write_first_at(
+    value_path: &[LedgerKey],
+    flag_path: &[LedgerKey],
+    value: &LedgerValue,
+) -> Vec<ImpactOp> {
+    let set = LedgerValue::bytes(1, vec![ImpactElem::Imm(Fr::from(1u64))]);
+    let write_value = cell_write_at(value_path, value);
+    let write_flag = cell_write_at(flag_path, &set);
+    let skip = write_value.len() + write_flag.len();
+    assert!(skip <= u32::MAX as usize, "branch skip fits a u32");
+    let mut ops = vec![
+        dup(0),
+        idx_path(false, false, flag_path),
+        ImpactOp::constant(&Op::Branch { skip: skip as u32 }),
+    ];
+    ops.extend(write_value);
+    ops.extend(write_flag);
+    ops
+}

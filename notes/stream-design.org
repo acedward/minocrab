@@ -431,3 +431,32 @@ Stack discipline used (from the table's own comments and onchain-vm =vm.rs=): =i
 Gates run: the compiler built from source under plain Chez 10.4.1 from nixpkgs with the flake's pinned nanopass and rough-draft (the repo's own devshells fail here: the default one on a crates.io mirror 403, the compiler one works but has no test-center node_modules), and compiled all three contracts with =--skip-zk=. The test-center TS test ran in the REAL runtime 0.19.101 with its on-chain VM (WASM), via a copy of =startContract= minus the proof checks (the zkir packages are not in this scratch env): both tests pass, including the assertion that =call='s and =raisePlain='s public transcripts contain no =popeq=. Added after the first run and also passing: the TypeScript =ledger()= accessor's =value=, =lookup=, =member= and the hand-written =iter= over the stamps. Commit amended to 73bda5d; PR body drafted at ~/compact-pr-stamped-counter.md. NOT run: the proof-checked variant the suite does through =flushProofChecks=, the e2e compile tests, and =./compiler/go= in full (launched in the background at the end; CONTRIBUTING requires it green before a PR). Not done: a language-version bump, which the unshielded-token precedent did and is the maintainers' call.
 
 For MinoCrab: this is the PI-equality target for M40 A. =nonces: StampedCounter<K>; seen: StampedCounter<K>= with =nonces.stamp(k); nonces.increment(1); seen.stamp(k)= at call and =seen.raiseTo(h)= at respond is the outbox with no emit, and the compat port of it is a row-snapshot away.
+
+* M40 A/B as built: the blind ops and the tuple layout (2026-09-15)
+
+Surface. =minocrab_std::v3::blind= (module-qualified: =blind::Add=, =blind::Max=, =blind::Min=, =blind::And=, =blind::Or=, =blind::Last=, =blind::First=) and two traits re-exported bare: =Primitive<S>= (the ledger side: =ACC_FIELDS=, =SNAPSHOT_FIELDS=, =type Acc=, =type Snapshot<K>=, =acc_at_block=, =snapshot_at_block=, =combine_blind=, =snapshot=, =lookup=, =remove=, =take=) and =Monoid<S>: Primitive<S>= (the circuit side: =identity=, =combine=). =Last= and =First= are primitives and not monoids; =First='s accumulator is =FirstAcc { value, written }=, two cells. On =LedgerCell<T>=: =snapshot_into(c, &map, &key)= and =combine_blind(c, op, &delta)=, the latter bounded =O: Primitive<T, Acc = LedgerCell<T>>= so =First= is an E0271 there. Tuples =(A, B)= to =(A, B, C, D)= are primitives when each component is, laid out one cell then one snapshot map per component in order (=acc_at_block= / =snapshot_at_block= sum the components' field counts); a non-primitive component is E0277 (compile-fail doctest on the module). Widths: =Add= / =Max= / =Min= on =Uint<8|16|32|64, Public>= only, because the VM's =add= and =lt= decode the cell as a =u64= (=vm.rs=); =And= / =Or= on =Bool<Public>=; =Last= / =First= on any =LedgerRepr=.
+
+Spellings emitted (=minocrab_ledger::{cell_snapshot_into_map_at, cell_add_at, cell_max_at, cell_min_at, cell_and_at, cell_or_at, cell_write_first_at}=), L = path length, top-level L = 1:
+- snapshot: =idxp m; push key; dup 2L+1; idx cell; ins 1; insc L= — the =dup= is =Map.insertCoin='s reach-back to the state under the =(container, key)= pairs the =idxp= left; the fetched value is as strong as the state, so it persists.
+- add: =idxp f; push Δ; add; insc L=. NOT =addi=: the delta is a circuit value and =addi='s operand is an op immediate, so =Counter.increment='s three-op form is the literal special case (still =LedgerCounter::increment=) and the general one is four ops. The chain's =add= is =checked_add=; overflow fails the transaction, gated below.
+- max: =idxp f; pushs Δ; dup 1; dup 1; lt; neg; branch 3; swap 0; pop; jmp 1; pop; insc L=. CORRECTION to the milestone's sketch (=branch 2; swap 0; pop; ins=): without the =jmp 1= / second =pop= the cur-wins arm falls through with =[cur, Δ]= on the stack and writes Δ. The as-built compactc =raiseTo= form above is right; the VM gate checks both arms and the equal case. Δ is =pushs= because on its winning path it is what gets persisted (a =push= value is weak and the runtime refuses to persist it).
+- min: the same without the =neg=.
+- and / or: =idxp f; push Δ; and|or; insc L=.
+- last: a cell write. first: =dup 0; idx flag; branch k; <write value>; <write flag true>=, k the two writes' op count (3 + 3 at the top level).
+
+Gate (=crates/minocrab-std/tests/v3_blind.rs=, 13 tests, all passing 2026-09-15): every transcript compiled, run by =minocrab_sim::v3::exec= (the executor: Midnight's =run_program= in gather mode, then verify mode for the post-state) against a seeded =StateValue=, the cells and map entries read back. Checked: snapshot copies (and overwrites an existing entry); add; add at =u64::MAX= is =ExecError::NotApplied= (the ledger refuses, the circuit is satisfied); max and min on both arms and at equality; and/or over all four input pairs; last; first when unwritten (value lands, flag set) and when written (both skipped); =take= reads the entry and removes it, a wrong expected value is the circuit's rejection, an absent key is the VM's; the =(Add, Max)= pair inserts blind (combine then snapshot, so the stored state is the post-step value) and =take= returns both components; the tuple monoid is componentwise. Every blind op: =Executed::reads= empty, =consumed_public= 0, no public transcript outputs — zero read rows. The typed spellings are ZKIR-byte-identical to the explicit op lists (the no-hidden-ops invariant, as =v3_ledger.rs= states it).
+
+Costs (=costs= test; rows are the circuit's TOTAL with two disclosed =Uint<64>= arguments, so the argument overhead is in every row; Impact ops as decoded from the transcript):
+| op | k | rows | Impact ops |
+|---|---|---|---|
+| snapshot | 5 | 20 | 6 |
+| add | 5 | 15 | 4 |
+| max | 5 | 25 | 12 |
+| min | 5 | 24 | 11 |
+| and | 5 | 15 | 4 |
+| or | 5 | 15 | 4 |
+| last | 5 | 15 | 3 |
+| first | 6 | 33 | 9 |
+| (Add, Max) insert: combine (1, h) then snapshot both | 7 | 68 | 28 |
+| (Add, Max) take: lookup + remove both | 6 | 54 | 16 |
+A blind op is single-digit rows; nothing here moves k. The outbox's insert is 68 rows against compactc's 368-row =push= (§11), because it embeds no read.

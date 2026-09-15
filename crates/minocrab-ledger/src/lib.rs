@@ -71,6 +71,8 @@ pub use kernel::{
     BalanceCmp,
 };
 pub use ops::{
+    cell_add_at, cell_and_at, cell_max_at, cell_min_at, cell_or_at, cell_snapshot_into_map_at,
+    cell_write_first_at,
     cell_write, cell_write_at, cell_write_coin, cell_write_coin_at, counter_increment,
     counter_increment_at, counter_reset, counter_reset_at, empty_counter,
     empty_historic_merkle_tree_value, empty_list, empty_map, empty_merkle_tree_value, emit_event,

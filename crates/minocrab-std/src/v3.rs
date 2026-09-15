@@ -27,6 +27,12 @@ mod disclose;
 mod entry;
 mod ledger;
 
+/// Blind accumulators (M40): the steps the ledger applies itself — `Add`,
+/// `Max`, `Min`, `And`, `Or`, `Last`, `First` and tuples of them — with a
+/// blind snapshot into a per-key map. Written module-qualified
+/// (`blind::Max`) except for the two traits.
+pub mod blind;
+
 /// Compact's `kernel` ADT and the token stdlib built on it (M17) — always
 /// written module-qualified (`kernel::balance(c, &t)`), because a kernel
 /// operation is an EFFECT on the transaction and the call site should say so.
@@ -47,6 +53,7 @@ pub mod borsh;
 /// site.
 pub mod hash;
 
+pub use blind::{Monoid, Primitive};
 pub use entry::{entry, entry_out, ArgPath, CircuitArg, CircuitArgs, CircuitOut};
 
 /// The ledger block as types: `#[derive(Ledger)]`'s declaration-order

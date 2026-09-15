@@ -41,8 +41,9 @@ use minocrab::v3::{
     Secp256k1PointT, Wire3,
 };
 use minocrab::{Alignment, AlignmentAtom, AlignmentSegment, Fr, Public};
+use super::blind::Primitive;
 use minocrab_ledger::{
-    atom_limbs, cell_read_embedded_at, cell_write_at, counter_increment_at, counter_less_than_at,
+    atom_limbs, cell_read_embedded_at, cell_snapshot_into_map_at, cell_write_at, counter_increment_at, counter_less_than_at,
     counter_read_at, counter_reset_at, emit, empty_counter, empty_historic_merkle_tree_value,
     empty_list, empty_map, empty_merkle_tree_value, historic_merkle_tree_check_root_at,
     historic_merkle_tree_insert_at, historic_merkle_tree_insert_index_at,
@@ -880,7 +881,7 @@ impl<K, V> LedgerMap<K, V> {
 
 impl<K, V, P: LedgerPath> LedgerMap<K, V, P> {
     /// compactc's `f` for this slot.
-    fn ledger_path(&self) -> Vec<LedgerKey> {
+    pub(crate) fn ledger_path(&self) -> Vec<LedgerKey> {
         self.path.to_path()
     }
 }
@@ -1782,7 +1783,7 @@ impl<T> LedgerCell<T> {
     }
 
     /// compactc's `f` for this slot.
-    fn ledger_path(&self) -> Vec<LedgerKey> {
+    pub(crate) fn ledger_path(&self) -> Vec<LedgerKey> {
         self.path.to_path()
     }
 }
@@ -1799,6 +1800,46 @@ impl<T: LedgerRepr> LedgerCell<T> {
     pub fn write(&self, c: &mut Circuit3, value: &T) {
         let value = value.ledger_value(c);
         emit(c, &cell_write_at(&self.ledger_path(), &value));
+    }
+
+    /// THE BLIND SNAPSHOT (M40): `map[key] = x` with the circuit never
+    /// learning `x` — `idxp m; push key; dup 2·len(m)+1; idx f; ins 1;
+    /// insc len(m)`, no `popeq`, no public input, nothing to go stale. The
+    /// map's value type is this cell's, by the signature.
+    ///
+    /// Not expressible in Compact, whose `m.insert(k, x)` READS `x` first;
+    /// the gate is the on-chain VM (`tests/v3_blind.rs`).
+    pub fn snapshot_into<K: LedgerRepr, P: LedgerPath>(
+        &self,
+        c: &mut Circuit3,
+        map: &LedgerMap<K, T, P>,
+        key: &K,
+    ) {
+        let key = key.ledger_value(c);
+        emit(
+            c,
+            &cell_snapshot_into_map_at(&self.ledger_path(), &map.ledger_path(), &key),
+        );
+    }
+
+    /// THE BLIND COMBINE (M40): `x ⊕= delta` for a [`Primitive`] step whose
+    /// accumulator is this one cell — `cell.combine_blind(c, Max, &h)`.
+    /// [`First`](super::blind::First) needs a flag cell beside the value and
+    /// is rejected here by its `Acc` type; it is driven through
+    /// [`Primitive::combine_blind`] on a [`FirstAcc`](super::blind::FirstAcc):
+    ///
+    /// ```compile_fail
+    /// # use minocrab::v3::{Circuit3, FieldT};
+    /// # use minocrab::Public;
+    /// # use minocrab_std::v3::{blind::First, LedgerCell, Uint};
+    /// # let mut c = Circuit3::new();
+    /// # let d = Uint::<64, Public>::from_field_unchecked(c.arg::<FieldT>("d").public());
+    /// const N: LedgerCell<Uint<64, Public>> = LedgerCell::at(0);
+    /// // error[E0271]: type mismatch resolving `<First as Primitive<Uint<64, Public>>>::Acc == LedgerCell<Uint<64, Public>>`
+    /// N.combine_blind(&mut c, First, &d);
+    /// ```
+    pub fn combine_blind<O: Primitive<T, Acc = LedgerCell<T>>>(&self, c: &mut Circuit3, _op: O, delta: &T) {
+        O::combine_blind(c, self, delta)
     }
 }
 

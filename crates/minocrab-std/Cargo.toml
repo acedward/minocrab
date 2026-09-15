@@ -57,6 +57,12 @@ all-features = true
 
 [dev-dependencies]
 minocrab-sim = { path = "../minocrab-sim", features = ["unstable"] }
+# The blind ops' gate (M40, tests/v3_blind.rs) seeds a `StateValue` and runs
+# each transcript through Midnight's on-chain VM via the executor; these
+# three are the state tree's own types. Already in the lock.
+midnight-onchain-state.workspace = true
+midnight-storage.workspace = true
+midnight-base-crypto.workspace = true
 minocrab-ir = { path = "../minocrab-ir", features = ["unstable"] }
 minocrab-zkir = { path = "../minocrab-zkir" }
 # v3 secp tests generate ECDSA signatures through zkir-v3's own off-circuit
