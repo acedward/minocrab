@@ -12,7 +12,7 @@ Open milestones are ordered by PRIORITY, not number (dmd, 2026-09-04):
 the quick wins M31-M34 sit ahead of the long-running Lean work (M27),
 which is filed last. Session start = the first open milestone in file
 order.
-M40 and M41 sit at the VERY TOP, ahead of the closed summaries (dmd, 2026-09-15: needed soon).
+M40 and M41 sit at the VERY TOP, ahead of the closed summaries (dmd, 2026-09-15: needed soon); M42 follows them (2026-09-16).
 
 * M40 — Blind ledger ops, and Bounded/NonEmpty vectors: the std layer under the stream (dmd, 2026-09-15)
 Design: notes/stream-design.org (the whole derivation, decisions marked DECIDED) and notes/nonce-admin.org §11 (the two-phase flush costed). The finding that drives this milestone: a ledger op that fetches a cell and stores or combines it WITHOUT a =popeq= never goes stale, which is why =LedgerCounter::increment= (=idxp; addi; insc=) never conflicts; real Impact (midnight-ledger's onchain-vm =ops.rs=: Noop Lt Eq Type Size New And Or Neg Log Root Pop Popeq Addi Subi Push Branch Jmp Add Sub Concat Member Rem Dup Swap Idx Ins Ckpt) can therefore snapshot a cell into a map entry and combine a cell with a public constant under add, max, min, and, or, blind. Nothing below is expressible in Compact, so there is no PI-equality gate; the gate is the on-chain VM itself.
@@ -31,6 +31,14 @@ Design DECIDED in notes/stream-design.org (option one): =StreamSpec { Key, Body,
 - [X] D. (2026-09-15: "M41 as built" in notes/stream-design.org, §11 links it, the spec consequence recorded there.) THE NOTES: notes/stream-design.org gains the as-built section (surface, costs, gate results verbatim, what is left), nonce-admin.org §11 links it, and the spec consequence is recorded for dmd's SigTransactionSpec: the request id is computed at emit, identical pre-records collide only between call and emit.
 - [X] E. (2026-09-15: "The outbox: a contention-free call queue" under Cross-chain calls, with the row/k table.) README: the nonce + last-seen outbox as the worked example of a contention-free pattern Compact cannot write (see M40 D and notes/stream-design.org's Compact comparison); the row/k table beside it.
 Exit criteria: A compiles with both gates; B's outbox audit shows zero shared reads and FeeEma flushes one to four; C decided and, if taken, PI-equal on the settle side; D written.
+
+* M42 — Ledger hooks: the write program as a typed value, and stale reads named (dmd, 2026-09-16)
+Design DECIDED in notes/hooks-design.org: inline is the read set, the hook is the write program; blind ops leave =LedgerCell= and live only on =Hook<B>=, attached with =c.then(hook)=, emitted after the body in attachment order, guarded by the ambient guard captured at attachment; every inline read returns =Assumed<T>=, usable by the proof as =T= but re-entering the ledger only through =.stale()=. No macro for now. =ckpt= stays in the backlog.
+- [ ] A. THE BUILDER: =Hook<B>= over type-level stack shapes with strength markers; =add=/=sub=/=max=/=min=/=and=/=or=, =write=/=insert=/=remove=, =copy=/=move_entry=, =if_absent=/=if_below=/=if_unset= as =select= with computed skips, =then=; =Blind= by construction (no =popeq= method); =c.then= with attachment order and guard capture. Gate: every method on the executor against a seeded state, including each failure row of the note's table; compile-fail doctests for a private argument and for a reach past the nibble.
+- [ ] B. =Assumed<T>=: every inline read returns it; proof-side consumption unchanged (predicates, =Select=, arithmetic); no =LedgerRepr=, no hook =push=; =.stale()= is the one way back. The build-time provenance backstop at the hook boundary, naming the read. COUNT the inline stale-write sites the wrapper forces in the ported contracts and record the number in the note before deciding whether inline stale writes are typed or linted.
+- [ ] C. PORT: =Stream='s primitive insert and =Outbox::call= / =raise_seen= onto hooks; =First= as =if_unset=; =combine_blind= / =snapshot_into= removed from =LedgerCell=; M40/M41 gates unchanged in what they assert.
+- [ ] D. NOTES + README: the as-built section in notes/hooks-design.org; the README's "Blind ledger update" entry rewritten around =Hook= and the inline/hook rule; the build-time backstop recorded for dmd's review per the compile-errors-over-panics rule.
+Exit criteria: A's executor gate green; B's count recorded and the decision taken; C PI-equal on the ported circuits' inline halves and identical in the outbox audit; D written.
 
 * M0 — Foundations, corpus, and layer map
 Research and setup, no eDSL code: the pinned toolchain, the corpus, and the

@@ -1,0 +1,82 @@
+#+title: Ledger hooks: the write program as a typed value
+
+Decided with dmd, 2026-09-16. Follows notes/stream-design.org (M40/M41): the blind ops exist; this is how they are exposed to a programmer.
+
+* The execution model, stated once
+
+Two phases. At proving time the circuit runs on the witness and produces a proof and a TRANSCRIPT: a fixed list of Impact instructions with every constant baked in. At inclusion the ledger runs the transcript against the live state and lands the new state or fails the transaction. Nothing runs in the circuit at inclusion; nothing runs on the ledger at proving time. So the transcript is a function that runs after the circuit, on shared state, with the circuit's outputs as its arguments.
+
+From the circuit's side the effects are APPLICATIVE: their structure never depends on any effect's result, because no effect has a result the circuit can see. A =popeq= is =assert(ledger.x == X)= with X a public input the prover supplied; the executor finds X by running the circuit against a state copy to a fixpoint. This is why every audit in the repo is static (leakage, contention, cost, disclosures). Inside the transcript the program is sequential (stack ops, =branch= on ledger values). The right name for the whole is optimistic concurrency control: the =popeq=s are the read set with assumed values, validated at commit; the writes are the write set, applied in emission order; the blind ops are commutative updates that bypass validation. Contention is read-set size on shared keys. Failure is atomic per transaction; =ckpt= splits a validated prefix from a fallible suffix and is in the backlog until it has its own design pass.
+
+* The rule for the programmer
+
+Inline is the read set; the hook is the write program. Anything inline that looks at the ledger is an assumption validated at landing and can go stale. Anything in the hook runs on whatever the ledger holds then, cannot go stale, and cannot tell the circuit anything. Blind reads and writes are therefore NOT offered inline (dmd: not easy to reason about); they live only in hooks.
+
+* The two surfaces
+
+Inline, as today: the typed ADT methods (=read=, =lookup=, =member=, =head=, the kernel reads), asserts on what came back, plain writes of circuit values. Every read is a =popeq=. =LedgerCell::combine_blind= and =snapshot_into= move OFF =LedgerCell= onto the hook builder.
+
+The hook: =Hook<B>=, a closed typed program over ledger block =B=, taking public constants, attached with =c.then(hook)=. Emitted after the whole body whatever the position of the =then= call; several hooks run in attachment order (stated, since it is observable); a hook attached inside =c.when(g, …)= captures the guard at attachment and is emitted under it at finish, so it is absent from the transcript when g is off. A hook sees every inline effect of the body, including writes that appear textually after the =then=. The builder has no =popeq= method, so =Hook<B>: Blind= by construction; library APIs that need contention-freedom take a =Hook=.
+
+#+begin_src rust
+fn stamp(k: Handle<Public>) -> Hook<Block> {
+    Hook::new()
+        .add(&B.nonce, 1u64)                      // idxp; addi; insc
+        .copy(&B.nonce, &B.nonce_at, &k)          // the snapshot
+        .copy(&B.seen, &B.seen_at, &k)
+}
+#[circuit]
+fn call(c: &mut Circuit3, pre: PreRecord) -> Discloses<(PreRecordFiled,)> {
+    let k = pre.handle(c);
+    let taken = B.bodies.member(c, &k);           // inline: a read-set entry, per key
+    c.assert(not(is_true(taken)).message("already called"));
+    B.bodies.insert(c, &k, &pre.entry());         // inline: a write of circuit values
+    c.then(stamp(k));                             // hook: runs after, blind
+    Discloses::of(())
+}
+#[circuit]
+fn respond(c: &mut Circuit3, k: Handle, att: Attestation) -> Discloses<(HandleSettled, Height)> {
+    let k = k.disclose_as::<HandleSettled>(c);
+    let seen = B.seen_at.lookup(c, &k);           // Assumed<Uint<64, Public>>, stable (written once)
+    let height = att.height.disclose_as::<Height>(c);
+    c.assert(height.gt(seen).message("not after the call"));   // C3, inline
+    B.bodies.remove(c, &k);
+    B.seen_at.remove(c, &k);
+    c.then(Hook::new().max(&B.seen, height));     // hook: blind max
+    Discloses::of(())
+}
+#+end_src
+
+Builder methods and when each fails the transaction (never on staleness):
+| method | on chain | fails when |
+|---|---|---|
+| =add=, =sub=, =max=, =min=, =and=, =or= on a cell | read-modify-write, no popeq | overflow, underflow |
+| =write(cell, v)=, =insert(map, k, v)=, =remove(map, k)= | the plain writes, as effects | never (remove of an absent key is a no-op) |
+| =copy(src, dst[, key])=, =move_entry(map, from, to)= | slot to slot, the circuit never sees the value | absent source |
+| =if_absent(map, k, ¦h¦ …)=, =if_below(cell, bound, ¦h¦ …)=, =if_unset(flag, ¦h¦ …)= | =branch= over a block; both arms typed to the same stack | inside the arm only |
+| =then(other)= | concatenation | as its parts |
+=First= stops being a special accumulator: =if_unset(flag, ¦h¦ h.write(cell, v).write(flag, true))=. No macro sugar for now (dmd: an expert tool; add =hook!= only if the builder becomes painful).
+
+* What the types enforce
+
+- Hook arguments are =Public= wires; a private value has no =push=. Disclose first.
+- Cell arithmetic only on =Uint<≤64>= cells, booleans only on =Bool= cells, =copy= only between slots of one type, =insert= only of the map's value type: the existing =LedgerRepr= machinery.
+- The stack: =Program<In, Out>= over type-level stack shapes (=State=, =Map<K,V>=, =Cell<T>=, =Key<K>=, =Bool=, =U64=), each op a method that exists only on the shapes it accepts; =branch=/=jmp= as =select(then, otherwise)= with both arms =S -> S'= and the skip counts computed (the milestone's Max off-by-one was a hand-counted skip). Strength as a marker: =push= is weak, =pushs=/arithmetic/=idx= are strong, =ins= requires strong (the compactc port's runtime failure becomes a compile error). Depth and reach bounds by missing impls at 16, as =KeyPath<11>=.
+- =Hook<B>: Blind= always; no =popeq= method exists.
+- Runtime, value-dependent, fails the transaction: absent key, overflow, underflow, array bounds, =concat= past the cell bound, gas.
+
+* Stale values must be named (dmd, 2026-09-16: "make sure you have to explicitly use stale variables if possible")
+
+Every inline read returns =Assumed<T>= instead of =T=. It behaves as =T= wherever the PROOF consumes it (asserts, comparisons, selects, arithmetic), so read-check-done code is unchanged. It has no =LedgerRepr= and no =push= into a hook, so re-entering the ledger — as a hook argument, as an inline write, as an inline insert — does not compile until the programmer writes =.stale()=, whose name is the record that the transaction assumes the value it read is still current at landing. The outbox never needs the word: it snapshots by blind =copy= instead of reading and writing back, which is the behaviour the type nudges toward.
+
+Backstop: types track direct read results, not values derived from them (=c.add(seen.field(), 1)= is a bare wire). The circuit builder knows every wire's provenance (the leakage inventory computes it from the ZKIR), so the hook boundary checks it at build time and refuses a transcript-derived argument that did not pass through =.stale()=, naming the read it descends from. A BUILD-TIME error, not a compile error — the property is dataflow, which Rust's types do not carry without an effect system — and therefore the last rung of the house ladder, recorded here for dmd's review.
+
+Churn: wrapping every read touches every ported contract. Reads feeding only asserts and arithmetic are untouched by construction; reads written back inline are exactly the stale-write sites. COUNT them when building and report the number; if large in the Compact ports, the fallback is the hook boundary by type first and inline stale writes as a lint. Not decided before measuring.
+
+* What changes in what exists
+
+=Stream='s primitive =insert= becomes inline body insert plus an attached hook; =Outbox::call= and =raise_seen= become the two circuits above; layouts unchanged. The ops in =minocrab-ledger= stay. Gate as M40: every builder method run through the executor on a seeded state; the two compile-fail classes (a private argument, an =Assumed= without =.stale()=) as doctests; the stream and outbox tests unchanged in what they assert.
+
+* Backlog
+
+=ckpt= (a commit point inside a transaction: what "fails" means changes; own design pass). Hook arguments derived from reads: allowed through =.stale()=; a first cut may forbid them outright if the backstop proves awkward.
