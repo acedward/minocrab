@@ -91,6 +91,12 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
 
     Ok(quote! {
+        impl #root::ProofWires for #name {
+            fn push_wires(&self, out: &mut ::std::vec::Vec<#root::Val>) {
+                #( #root::ProofWires::push_wires(&self.#idents, out); )*
+            }
+        }
+
         impl #root::LedgerRepr for #name {
             fn atoms() -> ::std::vec::Vec<#root::AlignmentAtom> {
                 let mut atoms = ::std::vec::Vec::new();

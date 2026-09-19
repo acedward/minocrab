@@ -15,9 +15,9 @@
 //!    performs zero reads (`Executed::reads` is empty, `consumed_public` is
 //!    zero), which is the whole point: with no `popeq` there is nothing a
 //!    landed transaction can make stale.
-//! 2. NO HIDDEN OPS. The typed spellings (`LedgerCell::snapshot_into`,
-//!    `LedgerCell::combine_blind`, the `Primitive` tuple impls) lower to the
-//!    byte-identical ZKIR of the explicit `minocrab_ledger` op lists.
+//! 2. NO HIDDEN OPS. The typed spellings (a `Hook`'s `copy`, each
+//!    `Primitive`'s `combine`, the tuple impls) lower to the byte-identical
+//!    ZKIR of the explicit `minocrab_ledger` op lists.
 //!
 //! The cost table at the bottom (`costs`) prints `(k, rows, Impact ops)` per
 //! op for the note.
@@ -39,7 +39,7 @@ use minocrab_sim::v3::cost;
 use minocrab_sim::v3::exec::{self, Call, ExecError, Executed};
 use minocrab_std::v3::blind::{Add, And, First, FirstAcc, Last, Max, Min, Or};
 use minocrab_std::v3::{
-    eq, Bool, Ledger, LedgerCell, LedgerMap, LedgerRepr, Monoid, Primitive, Uint,
+    eq, Bool, Hook, Ledger, LedgerCell, LedgerMap, LedgerRepr, Monoid, Primitive, Uint,
 };
 use minocrab_zkir::v3::to_zkir_string;
 
@@ -177,6 +177,13 @@ fn two_args(c: &mut Circuit3) -> (U64, U64) {
     (k, d)
 }
 
+/// `acc ⊕= delta` as the one attached hook: what every one-cell primitive
+/// spells since M42.
+fn blind<S, O: Primitive<S, Acc = LedgerCell<S>>>(c: &mut Circuit3, _op: O, acc: &LedgerCell<S>, delta: &S) {
+    let hook = O::combine(c, Hook::new(), acc, delta);
+    c.then(hook);
+}
+
 fn compile(body: impl FnOnce(&mut Circuit3)) -> Compiled3 {
     let mut c = Circuit3::new();
     body(&mut c);
@@ -206,7 +213,7 @@ fn assert_blind(executed: &Executed) {
 fn snapshot_copies_the_cell_into_the_map_entry_without_reading_it() {
     let circuit = compile(|c| {
         let (k, _d) = two_args(c);
-        BLOCK.n.snapshot_into(c, &BLOCK.n_snap, &k);
+        c.then(Hook::new().copy(&BLOCK.n, &BLOCK.n_snap, k));
     });
     let seed = Seed { n: 4242, ..Seed::default() };
     let out = run(&circuit, &seed, &[9, 0]).expect("the snapshot applies");
@@ -223,7 +230,7 @@ fn snapshot_copies_the_cell_into_the_map_entry_without_reading_it() {
 fn snapshot_of_a_boolean_cell() {
     let circuit = compile(|c| {
         let (k, _d) = two_args(c);
-        BLOCK.b.snapshot_into(c, &BLOCK.b_snap, &k);
+        c.then(Hook::new().copy(&BLOCK.b, &BLOCK.b_snap, k));
     });
     let seed = Seed { b: true, ..Seed::default() };
     let out = run(&circuit, &seed, &[3, 0]).expect("applies");
@@ -237,7 +244,7 @@ fn snapshot_of_a_boolean_cell() {
 fn add_combines_blind_and_overflow_fails_the_transaction() {
     let circuit = compile(|c| {
         let (_k, d) = two_args(c);
-        BLOCK.n.combine_blind(c, Add, &d);
+        blind(c, Add, &BLOCK.n, &d);
     });
     let seed = Seed { n: 40, ..Seed::default() };
     let out = run(&circuit, &seed, &[0, 2]).expect("applies");
@@ -255,7 +262,7 @@ fn add_combines_blind_and_overflow_fails_the_transaction() {
 fn max_keeps_the_larger_on_both_arms() {
     let circuit = compile(|c| {
         let (_k, d) = two_args(c);
-        BLOCK.n.combine_blind(c, Max, &d);
+        blind(c, Max, &BLOCK.n, &d);
     });
     // Δ wins.
     let out = run(&circuit, &Seed { n: 10, ..Seed::default() }, &[0, 25]).expect("applies");
@@ -276,7 +283,7 @@ fn max_keeps_the_larger_on_both_arms() {
 fn min_keeps_the_smaller_on_both_arms() {
     let circuit = compile(|c| {
         let (_k, d) = two_args(c);
-        BLOCK.n.combine_blind(c, Min, &d);
+        blind(c, Min, &BLOCK.n, &d);
     });
     let out = run(&circuit, &Seed { n: 10, ..Seed::default() }, &[0, 25]).expect("applies");
     assert_blind(&out);
@@ -288,16 +295,16 @@ fn min_keeps_the_smaller_on_both_arms() {
 }
 
 #[test]
-fn and_or_combine_blind() {
+fn and_or_combine() {
     let and = compile(|c| {
         let (_k, d) = two_args(c);
         let d = Bool::from_field_unchecked(d.field());
-        BLOCK.b.combine_blind(c, And, &d);
+        blind(c, And, &BLOCK.b, &d);
     });
     let or = compile(|c| {
         let (_k, d) = two_args(c);
         let d = Bool::from_field_unchecked(d.field());
-        BLOCK.b.combine_blind(c, Or, &d);
+        blind(c, Or, &BLOCK.b, &d);
     });
     for (a, d) in [(false, false), (false, true), (true, false), (true, true)] {
         let seed = Seed { b: a, ..Seed::default() };
@@ -314,7 +321,7 @@ fn and_or_combine_blind() {
 fn last_overwrites_and_first_writes_once() {
     let last = compile(|c| {
         let (_k, d) = two_args(c);
-        BLOCK.n.combine_blind(c, Last, &d);
+        blind(c, Last, &BLOCK.n, &d);
     });
     let out = run(&last, &Seed { n: 5, ..Seed::default() }, &[0, 9]).expect("applies");
     assert_blind(&out);
@@ -326,7 +333,7 @@ fn last_overwrites_and_first_writes_once() {
             value: BLOCK.first,
             written: BLOCK.written,
         };
-        <First as Primitive<U64>>::combine_blind(c, &acc, &d);
+        let hook = <First as Primitive<U64>>::combine(c, Hook::new(), &acc, &d); c.then(hook);
     });
     // Nothing written yet: the value lands and the flag is set.
     let out = run(&first, &Seed::default(), &[0, 9]).expect("applies");
@@ -420,8 +427,9 @@ fn the_pair_round_trips_through_the_ledger() {
     let insert = compile(|c| {
         let (k, h) = two_args(c);
         let one = Uint::from_field_unchecked(c.constant(1u64));
-        <Pair as Primitive<PairState>>::combine_blind(c, &block.acc, &(one, h));
-        <Pair as Primitive<PairState>>::snapshot(c, &block.acc, &block.snap, &k);
+        let hook = <Pair as Primitive<PairState>>::combine(c, Hook::new(), &block.acc, &(one, h));
+        let hook = <Pair as Primitive<PairState>>::snapshot(c, hook, &block.acc, &block.snap, &k);
+        c.then(hook);
     });
     let out = run_pair(&insert, pair_state(6, 100, &[]), &[9, 120]).expect("applies");
     assert_blind(&out);
@@ -433,7 +441,7 @@ fn the_pair_round_trips_through_the_ledger() {
     // Take, and the two components come back together.
     let take = compile(|c| {
         let (k, expect_nonce) = two_args(c);
-        let (nonce, seen) = <Pair as Primitive<PairState>>::take(c, &block.snap, &k);
+        let (nonce, seen) = *<Pair as Primitive<PairState>>::take(c, &block.snap, &k);
         c.assert(eq(nonce, expect_nonce));
         c.assert(eq(seen, 120u64));
     });
@@ -472,16 +480,16 @@ fn u64_ledger(v: U64) -> LedgerValue {
 fn the_typed_spellings_are_the_explicit_ops() {
     let typed = compile(|c| {
         let (k, d) = two_args(c);
-        BLOCK.n.snapshot_into(c, &BLOCK.n_snap, &k);
-        BLOCK.n.combine_blind(c, Add, &d);
-        BLOCK.n.combine_blind(c, Max, &d);
-        BLOCK.n.combine_blind(c, Min, &d);
+        c.then(Hook::new().copy(&BLOCK.n, &BLOCK.n_snap, k));
+        blind(c, Add, &BLOCK.n, &d);
+        blind(c, Max, &BLOCK.n, &d);
+        blind(c, Min, &BLOCK.n, &d);
         let b = Bool::from_field_unchecked(d.field());
-        BLOCK.b.combine_blind(c, And, &b);
-        BLOCK.b.combine_blind(c, Or, &b);
-        BLOCK.n.combine_blind(c, Last, &d);
+        blind(c, And, &BLOCK.b, &b);
+        blind(c, Or, &BLOCK.b, &b);
+        blind(c, Last, &BLOCK.n, &d);
         let acc = FirstAcc { value: BLOCK.first, written: BLOCK.written };
-        <First as Primitive<U64>>::combine_blind(c, &acc, &d);
+        let hook = <First as Primitive<U64>>::combine(c, Hook::new(), &acc, &d); c.then(hook);
     });
     let explicit = compile(|c| {
         let (k, d) = two_args(c);
@@ -509,20 +517,21 @@ fn the_typed_spellings_are_the_explicit_ops() {
 #[test]
 fn costs() {
     let table: Vec<(&str, Compiled3)> = vec![
-        ("snapshot", compile(|c| { let (k, _) = two_args(c); BLOCK.n.snapshot_into(c, &BLOCK.n_snap, &k); })),
-        ("add", compile(|c| { let (_, d) = two_args(c); BLOCK.n.combine_blind(c, Add, &d); })),
-        ("max", compile(|c| { let (_, d) = two_args(c); BLOCK.n.combine_blind(c, Max, &d); })),
-        ("min", compile(|c| { let (_, d) = two_args(c); BLOCK.n.combine_blind(c, Min, &d); })),
-        ("and", compile(|c| { let (_, d) = two_args(c); let d = Bool::from_field_unchecked(d.field()); BLOCK.b.combine_blind(c, And, &d); })),
-        ("or", compile(|c| { let (_, d) = two_args(c); let d = Bool::from_field_unchecked(d.field()); BLOCK.b.combine_blind(c, Or, &d); })),
-        ("last", compile(|c| { let (_, d) = two_args(c); BLOCK.n.combine_blind(c, Last, &d); })),
-        ("first", compile(|c| { let (_, d) = two_args(c); let acc = FirstAcc { value: BLOCK.first, written: BLOCK.written }; <First as Primitive<U64>>::combine_blind(c, &acc, &d); })),
+        ("snapshot", compile(|c| { let (k, _) = two_args(c); c.then(Hook::new().copy(&BLOCK.n, &BLOCK.n_snap, k)); })),
+        ("add", compile(|c| { let (_, d) = two_args(c); blind(c, Add, &BLOCK.n, &d); })),
+        ("max", compile(|c| { let (_, d) = two_args(c); blind(c, Max, &BLOCK.n, &d); })),
+        ("min", compile(|c| { let (_, d) = two_args(c); blind(c, Min, &BLOCK.n, &d); })),
+        ("and", compile(|c| { let (_, d) = two_args(c); let d = Bool::from_field_unchecked(d.field()); blind(c, And, &BLOCK.b, &d); })),
+        ("or", compile(|c| { let (_, d) = two_args(c); let d = Bool::from_field_unchecked(d.field()); blind(c, Or, &BLOCK.b, &d); })),
+        ("last", compile(|c| { let (_, d) = two_args(c); blind(c, Last, &BLOCK.n, &d); })),
+        ("first", compile(|c| { let (_, d) = two_args(c); let acc = FirstAcc { value: BLOCK.first, written: BLOCK.written }; let hook = <First as Primitive<U64>>::combine(c, Hook::new(), &acc, &d); c.then(hook); })),
         ("(Add, Max) insert", compile(|c| {
             let block = pair_block();
             let (k, h) = two_args(c);
             let one = Uint::from_field_unchecked(c.constant(1u64));
-            <Pair as Primitive<PairState>>::combine_blind(c, &block.acc, &(one, h));
-            <Pair as Primitive<PairState>>::snapshot(c, &block.acc, &block.snap, &k);
+            let hook = <Pair as Primitive<PairState>>::combine(c, Hook::new(), &block.acc, &(one, h));
+            let hook = <Pair as Primitive<PairState>>::snapshot(c, hook, &block.acc, &block.snap, &k);
+            c.then(hook);
         })),
         ("(Add, Max) take", compile(|c| {
             let block = pair_block();

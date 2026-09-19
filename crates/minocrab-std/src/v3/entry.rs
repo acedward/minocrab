@@ -711,6 +711,16 @@ pub trait CircuitOut {
 }
 
 /// `[]` — a circuit that returns nothing.
+/// A read may be a circuit's OUTPUT as it is: the proof discloses what it
+/// assumed, which is exactly what the `popeq` validates.
+impl<T: CircuitOut> CircuitOut for super::Assumed<T> {
+    const SLOTS: usize = T::SLOTS;
+
+    fn emit(self, c: &mut Circuit3, label: &str) {
+        self.into_inner().emit(c, label)
+    }
+}
+
 impl CircuitOut for () {
     const SLOTS: usize = 0;
 
@@ -872,6 +882,11 @@ pub fn entry_out<A: CircuitArgs, O: CircuitOut>(
     args.constrain(&mut c);
 
     let out = body(&mut c, args);
+    // The hooks (`c.then`, notes/hooks-design.org) run after the whole
+    // body and before the outputs, so the disclosure record reads in
+    // transcript order. `finish` would flush them too; this is the
+    // ordering.
+    c.flush_deferred();
     out.emit(&mut c, label);
 
     // Every ported circuit is an exported entry point, and every exported

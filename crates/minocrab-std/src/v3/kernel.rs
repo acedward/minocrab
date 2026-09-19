@@ -38,6 +38,7 @@ use minocrab_ledger::{
     kernel_mint_unshielded, kernel_self, BalanceCmp, ImpactElem, LedgerValue,
 };
 
+use super::assumed::Assumed;
 use super::hash;
 use super::ledger::LedgerRepr;
 use super::predicate::is_true;
@@ -158,7 +159,15 @@ pub fn self_address(c: &mut Circuit3) -> SelfAddress {
     if let Some(cached) = c.ext_get::<CachedSelfAddress>() {
         return cached.0;
     }
-    SelfAddress(ContractAddress::from_limbs(kernel_self(c)))
+    let wires = kernel_self(c);
+    SelfAddress(ContractAddress::from_limbs(never_stale(c, wires)))
+}
+
+/// The kernel's self read is a `popeq` on a value no transaction can change,
+/// so it is acknowledged at the read and never wears `Assumed` (M42 B).
+fn never_stale(c: &mut Circuit3, wires: [Wire3<FieldT, Public>; 2]) -> [Wire3<FieldT, Public>; 2] {
+    c.acknowledge_stale(&[wires[0].val(), wires[1].val()]);
+    wires
 }
 
 /// Read `kernel.self()` ONCE and make it the ambient answer for every
@@ -180,7 +189,8 @@ pub fn self_address(c: &mut Circuit3) -> SelfAddress {
 /// `c.when(g, |c| self_address(c)).or_default()` is the guarded read
 /// (notes/edsl-trim.org §B).
 pub fn cache_self_address(c: &mut Circuit3) -> SelfAddress {
-    let me = SelfAddress(ContractAddress::from_limbs(kernel_self(c)));
+    let wires = kernel_self(c);
+    let me = SelfAddress(ContractAddress::from_limbs(never_stale(c, wires)));
     c.ext_insert(CachedSelfAddress(me));
     me
 }
@@ -247,9 +257,9 @@ fn concat_values(a: LedgerValue, b: LedgerValue) -> LedgerValue {
 /// `kernel.balance(token_type)` — the contract's balance of an unshielded
 /// token, or ZERO if it has never held one. See the module docs for what
 /// "balance" means here.
-pub fn balance(c: &mut Circuit3, token: &UnshieldedToken<Public>) -> Uint<128, Public> {
+pub fn balance(c: &mut Circuit3, token: &UnshieldedToken<Public>) -> Assumed<Uint<128, Public>> {
     let t = token.ledger_value();
-    Uint::from_field_unchecked(kernel_balance(c, &t, BalanceCmp::Value, None))
+    Assumed::of_read(Uint::from_field_unchecked(kernel_balance(c, &t, BalanceCmp::Value, None)))
 }
 
 /// `kernel.balanceLessThan(token_type, amount)`.
@@ -257,9 +267,9 @@ pub fn balance_less_than(
     c: &mut Circuit3,
     token: &UnshieldedToken<Public>,
     amount: Uint<128, Public>,
-) -> Bool<Public> {
+) -> Assumed<Bool<Public>> {
     let (t, amt) = (token.ledger_value(), amount.ledger_value(c));
-    Bool::from_field_unchecked(kernel_balance(c, &t, BalanceCmp::LessThan, Some(&amt)))
+    Assumed::of_read(Bool::from_field_unchecked(kernel_balance(c, &t, BalanceCmp::LessThan, Some(&amt))))
 }
 
 /// `kernel.balanceGreaterThan(token_type, amount)`.
@@ -267,21 +277,21 @@ pub fn balance_greater_than(
     c: &mut Circuit3,
     token: &UnshieldedToken<Public>,
     amount: Uint<128, Public>,
-) -> Bool<Public> {
+) -> Assumed<Bool<Public>> {
     let (t, amt) = (token.ledger_value(), amount.ledger_value(c));
-    Bool::from_field_unchecked(kernel_balance(c, &t, BalanceCmp::GreaterThan, Some(&amt)))
+    Assumed::of_read(Bool::from_field_unchecked(kernel_balance(c, &t, BalanceCmp::GreaterThan, Some(&amt))))
 }
 
 /// `kernel.blockTimeLessThan(t)` — whether the block time is before `t`.
-pub fn block_time_less_than(c: &mut Circuit3, time: Uint<64, Public>) -> Bool<Public> {
+pub fn block_time_less_than(c: &mut Circuit3, time: Uint<64, Public>) -> Assumed<Bool<Public>> {
     let t = time.ledger_value(c);
-    Bool::from_field_unchecked(kernel_block_time(c, &t, false))
+    Assumed::of_read(Bool::from_field_unchecked(kernel_block_time(c, &t, false)))
 }
 
 /// `kernel.blockTimeGreaterThan(t)`.
-pub fn block_time_greater_than(c: &mut Circuit3, time: Uint<64, Public>) -> Bool<Public> {
+pub fn block_time_greater_than(c: &mut Circuit3, time: Uint<64, Public>) -> Assumed<Bool<Public>> {
     let t = time.ledger_value(c);
-    Bool::from_field_unchecked(kernel_block_time(c, &t, true))
+    Assumed::of_read(Bool::from_field_unchecked(kernel_block_time(c, &t, true)))
 }
 
 // ---- the stdlib circuits ----------------------------------------------------
@@ -290,25 +300,25 @@ pub fn block_time_greater_than(c: &mut Circuit3, time: Uint<64, Public>) -> Bool
 // primitives above and nothing else.
 
 /// `circuit blockTimeLt(time): Boolean { return kernel.blockTimeLessThan(time); }`
-pub fn block_time_lt(c: &mut Circuit3, time: Uint<64, Public>) -> Bool<Public> {
+pub fn block_time_lt(c: &mut Circuit3, time: Uint<64, Public>) -> Assumed<Bool<Public>> {
     block_time_less_than(c, time)
 }
 
 /// `circuit blockTimeGte(time): Boolean { return !blockTimeLt(time); }`
-pub fn block_time_gte(c: &mut Circuit3, time: Uint<64, Public>) -> Bool<Public> {
+pub fn block_time_gte(c: &mut Circuit3, time: Uint<64, Public>) -> Assumed<Bool<Public>> {
     let lt = block_time_lt(c, time);
-    not(c, lt)
+    Assumed::of_read(not(c, lt.into_inner()))
 }
 
 /// `circuit blockTimeGt(time): Boolean { return kernel.blockTimeGreaterThan(time); }`
-pub fn block_time_gt(c: &mut Circuit3, time: Uint<64, Public>) -> Bool<Public> {
+pub fn block_time_gt(c: &mut Circuit3, time: Uint<64, Public>) -> Assumed<Bool<Public>> {
     block_time_greater_than(c, time)
 }
 
 /// `circuit blockTimeLte(time): Boolean { return !blockTimeGt(time); }`
-pub fn block_time_lte(c: &mut Circuit3, time: Uint<64, Public>) -> Bool<Public> {
+pub fn block_time_lte(c: &mut Circuit3, time: Uint<64, Public>) -> Assumed<Bool<Public>> {
     let gt = block_time_gt(c, time);
-    not(c, gt)
+    Assumed::of_read(not(c, gt.into_inner()))
 }
 
 /// Compact's `!b` on a Boolean, which compactc lowers to
@@ -319,7 +329,7 @@ fn not(c: &mut Circuit3, b: Bool<Public>) -> Bool<Public> {
 }
 
 /// `circuit unshieldedBalance(color): Uint<128>`
-pub fn unshielded_balance(c: &mut Circuit3, color: CoinColor<Public>) -> Uint<128, Public> {
+pub fn unshielded_balance(c: &mut Circuit3, color: CoinColor<Public>) -> Assumed<Uint<128, Public>> {
     let token = unshielded(c, color);
     balance(c, &token)
 }
@@ -329,7 +339,7 @@ pub fn unshielded_balance_lt(
     c: &mut Circuit3,
     color: CoinColor<Public>,
     amount: Uint<128, Public>,
-) -> Bool<Public> {
+) -> Assumed<Bool<Public>> {
     let token = unshielded(c, color);
     balance_less_than(c, &token, amount)
 }
@@ -339,9 +349,9 @@ pub fn unshielded_balance_gte(
     c: &mut Circuit3,
     color: CoinColor<Public>,
     amount: Uint<128, Public>,
-) -> Bool<Public> {
+) -> Assumed<Bool<Public>> {
     let lt = unshielded_balance_lt(c, color, amount);
-    not(c, lt)
+    Assumed::of_read(not(c, lt.into_inner()))
 }
 
 /// `circuit unshieldedBalanceGt(color, amount): Boolean`
@@ -349,7 +359,7 @@ pub fn unshielded_balance_gt(
     c: &mut Circuit3,
     color: CoinColor<Public>,
     amount: Uint<128, Public>,
-) -> Bool<Public> {
+) -> Assumed<Bool<Public>> {
     let token = unshielded(c, color);
     balance_greater_than(c, &token, amount)
 }
@@ -359,9 +369,9 @@ pub fn unshielded_balance_lte(
     c: &mut Circuit3,
     color: CoinColor<Public>,
     amount: Uint<128, Public>,
-) -> Bool<Public> {
+) -> Assumed<Bool<Public>> {
     let gt = unshielded_balance_gt(c, color, amount);
-    not(c, gt)
+    Assumed::of_read(not(c, gt.into_inner()))
 }
 
 /// ```text
@@ -387,6 +397,7 @@ pub fn receive_unshielded(c: &mut Circuit3, color: CoinColor<Public>, amount: Ui
 fn is_self(c: &mut Circuit3, recipient: &UnshieldedRecipient<Public>) -> Wire3<FieldT, Public> {
     let is_left = recipient.is_left.field();
     let me = guarded_kernel_self(c, is_left);
+    let me = never_stale(c, me);
     let left = recipient.left.bytes();
     let eq_hi = c.test_eq(left.hi, me[0]);
     let eq_lo = c.test_eq(left.lo, me[1]);

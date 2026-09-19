@@ -17,8 +17,8 @@ use minocrab::{Alignment, AlignmentAtom, AlignmentSegment, Fr, Meet, Private, Pu
 /// expansion depends on nothing a user must import.
 #[doc(hidden)]
 pub mod __derive {
-    pub use super::{repr_limbs, LedgerRepr};
-    pub use minocrab::v3::{Circuit3, FieldT, Wire3};
+    pub use super::{repr_limbs, LedgerRepr, ProofWires};
+    pub use minocrab::v3::{Circuit3, FieldT, Val, Wire3};
     pub use minocrab::{AlignmentAtom, Public};
 }
 
@@ -31,7 +31,9 @@ mod ledger;
 /// `Max`, `Min`, `And`, `Or`, `Last`, `First` and tuples of them — with a
 /// blind snapshot into a per-key map. Written module-qualified
 /// (`blind::Max`) except for the two traits.
+mod assumed;
 pub mod blind;
+mod hook;
 mod stream;
 mod vector;
 
@@ -55,7 +57,9 @@ pub mod borsh;
 /// site.
 pub mod hash;
 
+pub use assumed::{Assumed, ProofWires};
 pub use blind::{Monoid, Primitive};
+pub use hook::{CellArith, Hook, HookValue, Reachable};
 pub use stream::{ContentionFree, Fold, Serial, Step, Stream, StreamSpec};
 pub use vector::{Bounded, NonEmpty};
 pub use entry::{entry, entry_out, ArgPath, CircuitArg, CircuitArgs, CircuitOut};
@@ -73,6 +77,7 @@ pub use entry::{entry, entry_out, ArgPath, CircuitArg, CircuitArgs, CircuitOut};
 /// [`LedgerAdt`] that splits the value position into plain values and ADT
 /// handles.
 pub use ledger::{
+    Fresh,
     assert_distinct_kinds, leaf_hash, repr_limbs, CoinArm, FieldPath, KeyPath, KeyedPath, LedgerAdt,
     LedgerCell, LedgerCounter, LedgerField, LedgerHistoricMerkleTree, LedgerList, LedgerMap,
     LedgerMerkleTree, LedgerPath, LedgerRepr, LedgerSet, LedgerSlot, LedgerWidth,
@@ -1198,6 +1203,12 @@ macro_rules! b32_newtype {
                 b: Self,
             ) -> Self {
                 $name(::minocrab::v3::Select::select(c, bit, a.0, b.0))
+            }
+        }
+
+        impl $crate::v3::ProofWires for $name<::minocrab::Public> {
+            fn push_wires(&self, out: &mut Vec<::minocrab::v3::Val>) {
+                $crate::v3::ProofWires::push_wires(&self.0, out)
             }
         }
 

@@ -402,7 +402,7 @@ fn vault_token_domain_separator(
 /// cell read HERE — inside an argument builder, so the read emits where the
 /// deployed circuit reads it (`crate::evm::AbiArgs`).
 fn cell_address(c: &mut Circuit3, cell: &LedgerCell<Bytes<20, Public>>) -> Bytes<20, Private> {
-    Bytes::from_field_unchecked(cell.read(c).field().private())
+    Bytes::from_field_unchecked(cell.read(c).stale(c).field().private())
 }
 
 /// `struct ShieldedCoinInfo { nonce, color, value }` as an argument.
@@ -812,7 +812,7 @@ impl Vault {
         VAULT.swaps.request_with(
             c,
             |c| {
-                let router = VAULT.uniswap_router.read(c);
+                let router = VAULT.uniswap_router.read(c).stale(c);
                 Contract::<UniswapV3Router>::from_address(c, router)
             },
             (
@@ -882,7 +882,7 @@ impl Vault {
         let recipient = own_public_key(c).disclose_as::<SwapRecipient>(c);
         let mint_nonce = mint_nonce.disclose_as::<SwapMintNonce>(c);
 
-        let env = outcome.env.inner;
+        let env = outcome.env.map(|e| e.inner);
         let ds_out = vault_token_domain_separator(c, env.token_out.field());
         common::mint_shielded_token_to_key(c, &ds_out, env.amount_out, &mint_nonce, &recipient);
 
@@ -977,7 +977,7 @@ impl Vault {
                 // THE CALLEE IS THE UNDERLYING ERC-20, and the stata
                 // token is the SPENDER argument: this approval lets the
                 // wrapper pull the underlying during a supply.
-                let underlying = VAULT.stata_underlying.read(c);
+                let underlying = VAULT.stata_underlying.read(c).stale(c);
                 Contract::<Erc20>::from_address(c, underlying)
             },
             (
@@ -1021,14 +1021,14 @@ impl Vault {
         });
 
         let amount_field = amount.field();
-        let stata_underlying = VAULT.stata_underlying.read(c);
+        let stata_underlying = VAULT.stata_underlying.read(c).stale(c);
         burn_vault_coin(c, one, stata_underlying.field(), amount_field, coin);
 
         // deposit(amount, vaultEvmAddress) on the wrapper.
         VAULT.supplies.request_with(
             c,
             |c| {
-                let stata = VAULT.stata_token.read(c);
+                let stata = VAULT.stata_token.read(c).stale(c);
                 Contract::<Erc4626>::from_address(c, stata)
             },
             (
@@ -1074,7 +1074,7 @@ impl Vault {
         let recipient = own_public_key(c).disclose_as::<SupplyRecipient>(c);
         let mint_nonce = mint_nonce.disclose_as::<SupplyMintNonce>(c);
         let shares = outcome.output.disclose_as::<AttestedShares>(c);
-        let stata_token = VAULT.stata_token.read(c);
+        let stata_token = VAULT.stata_token.read(c).stale(c);
         let domain_sep = vault_token_domain_separator(c, stata_token.field());
         common::mint_shielded_token_to_key(c, &domain_sep, shares, &mint_nonce, &recipient);
         Discloses::of(())
@@ -1092,7 +1092,7 @@ impl Vault {
         assert_initialized(c);
         let (own_pk, env, _shares) = VAULT.supplies.refund_to_owner::<RefundRecipient>(c, ticket);
         let mint_nonce = mint_nonce.disclose_as::<RefundMintNonce>(c);
-        let stata_underlying = VAULT.stata_underlying.read(c);
+        let stata_underlying = VAULT.stata_underlying.read(c).stale(c);
         let domain_sep = vault_token_domain_separator(c, stata_underlying.field());
         common::mint_shielded_token_to_key(c, &domain_sep, env.amount, &mint_nonce, &own_pk);
         Discloses::of(())
@@ -1132,7 +1132,7 @@ impl Vault {
         let shares_field = shares.field();
         // The wrapper token gates both the burn and `to`: one read, reused (this
         // lineage is not PI-pinned to compactc, which reads it twice).
-        let stata_token = VAULT.stata_token.read(c);
+        let stata_token = VAULT.stata_token.read(c).stale(c);
         burn_vault_coin(c, one, stata_token.field(), shares_field, coin);
 
         // redeem(shares, vaultEvmAddress, vaultEvmAddress) — the cell is read
@@ -1196,7 +1196,7 @@ impl Vault {
         let recipient = own_public_key(c).disclose_as::<RedeemRecipient>(c);
         let mint_nonce = mint_nonce.disclose_as::<RedeemMintNonce>(c);
         let assets = outcome.output.disclose_as::<AttestedAssets>(c);
-        let stata_underlying = VAULT.stata_underlying.read(c);
+        let stata_underlying = VAULT.stata_underlying.read(c).stale(c);
         let domain_sep = vault_token_domain_separator(c, stata_underlying.field());
         common::mint_shielded_token_to_key(c, &domain_sep, assets, &mint_nonce, &recipient);
         Discloses::of(())
@@ -1214,7 +1214,7 @@ impl Vault {
         assert_initialized(c);
         let (own_pk, env, _assets) = VAULT.redeems.refund_to_owner::<RefundRecipient>(c, ticket);
         let mint_nonce = mint_nonce.disclose_as::<RefundMintNonce>(c);
-        let stata_token = VAULT.stata_token.read(c);
+        let stata_token = VAULT.stata_token.read(c).stale(c);
         let domain_sep = vault_token_domain_separator(c, stata_token.field());
         common::mint_shielded_token_to_key(c, &domain_sep, env.shares, &mint_nonce, &own_pk);
         Discloses::of(())

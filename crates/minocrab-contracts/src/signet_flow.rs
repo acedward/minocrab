@@ -81,6 +81,7 @@ use minocrab::{Private, Public};
 use minocrab_ledger::{XcallCommitment, XcallEntryPointHash};
 use minocrab_std::v3::borsh::{BorshReader, CircuitBorsh, FieldSpec, LayoutPath, Limbs};
 use minocrab_std::v3::Serializer;
+use minocrab_std::v3::Assumed;
 use minocrab_std::v3::{
     is_true, kernel, label, not, ArgPath, CircuitAbi, CircuitArg, Disclose, LedgerCell,
     LedgerCounter, LedgerField, LedgerMap, LedgerRepr, LedgerWidth, Prim, Secp256k1Point, Uint,
@@ -282,14 +283,16 @@ pub type Settled = (RequestIdSettled,);
 pub struct Outcome<Env, R, const WORDS: usize> {
     /// The request id, disclosed.
     pub request_id: RequestId<Public>,
-    /// The environment the request filed.
-    pub env: Env,
+    /// The environment the request filed — an inline read of the entry
+    /// written at the request, so an assumption (M42 B): the proof uses it
+    /// freely; writing it back is `.stale(c)`.
+    pub env: Assumed<Env>,
     /// The attested output — verified, its kind checked, its fields
     /// canonical.
     pub output: R,
     /// The signing record the MPC read, should the settle logic need a
-    /// field of it (the request nonce, say).
-    pub record: EventRecordV2<WORDS>,
+    /// field of it (the request nonce, say). Read inline, likewise.
+    pub record: Assumed<EventRecordV2<WORDS>>,
 }
 
 /// The filing every request does, whatever the slot: read the context,
@@ -310,9 +313,11 @@ pub(crate) fn file_request<const WORDS: usize>(
     let _ = c.constant(1u64);
     let zero = c.constant(0u64);
     let me = kernel::cache_self_address(c);
-    let nonce = signet.request_nonce.read(c);
-    let caip2 = signet.caip2_id.read(c);
-    let chain_id = signet.evm_chain_id.read(c);
+    // Read, hashed into the record, bumped: the filing's one
+    // read-modify-write, named as such (M42 B; notes/nonce-admin.org §10.1).
+    let nonce = signet.request_nonce.read(c).stale(c);
+    let caip2 = signet.caip2_id.read(c).stale(c);
+    let chain_id = signet.evm_chain_id.read(c).stale(c);
     let tx = req.tx;
     let tx_params = EvmType2TxParams::<Private, WORDS> {
         chain_id: chain_id.field().private(),

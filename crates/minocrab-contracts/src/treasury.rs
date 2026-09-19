@@ -158,9 +158,10 @@ impl Treasury {
         // moved nothing, and prover-chosen padding when the MPC attested
         // its failure kind. A treasury has no use for it; naming it `_`
         // says so where dropping it silently would not.
-        let (_owner, Amount { amount: _amount }, _flag) = TREASURY
+        let (_owner, _env, _flag) = TREASURY
             .transfers
             .refund_to_owner::<RefundRecipient>(c, ticket);
+        let Amount { amount: _amount } = *_env;
         Discloses::of(())
     }
 }

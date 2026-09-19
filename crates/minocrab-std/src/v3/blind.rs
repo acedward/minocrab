@@ -1,5 +1,9 @@
 //! BLIND ACCUMULATORS (M40, notes/stream-design.org): the steps the ledger
 //! applies ITSELF, with no `popeq` and therefore nothing that can go stale.
+//! Since M42 (notes/hooks-design.org) they are spelled on a [`Hook`]: a
+//! [`Primitive`] APPENDS its combine and its snapshot to a hook, and the
+//! hook is attached with `c.then` to run after the body; nothing blind is
+//! offered inline.
 //!
 //! A ledger read is a fetch plus a `popeq` equality check against the
 //! proof's public input, and that check is the only thing a landed
@@ -49,15 +53,13 @@
 //! Nothing here is expressible in Compact, so there is no compactc
 //! differential; the gate is Midnight's on-chain VM
 //! (`tests/v3_blind.rs` runs each transcript on a seeded state and reads
-//! the cells back).
+//! the cells back; `tests/v3_hook.rs` gates the builder underneath).
 
 use minocrab::v3::Circuit3;
 use minocrab::Public;
-use minocrab_ledger::{
-    cell_add_at, cell_and_at, cell_max_at, cell_min_at, cell_or_at, cell_write_at,
-    cell_write_first_at, emit,
-};
 
+use super::assumed::Assumed;
+use super::hook::{Hook, Lowered};
 use super::ledger::{LedgerCell, LedgerMap, LedgerRepr};
 use super::{Bool, Uint};
 
@@ -84,17 +86,27 @@ pub trait Primitive<S>: Sized {
     /// The snapshot maps' handles, likewise.
     fn snapshot_at_block<K>(total: usize, start: usize) -> Self::Snapshot<K>;
 
-    /// `acc ⊕= delta`, blind: no public input, nothing to go stale.
-    fn combine_blind(c: &mut Circuit3, acc: &Self::Acc, delta: &S);
-    /// `snapshot[key] = acc`, blind, one copy per component.
-    fn snapshot<K: LedgerRepr>(c: &mut Circuit3, acc: &Self::Acc, snapshot: &Self::Snapshot<K>, key: &K);
+    /// `acc ⊕= delta` appended to `hook` (M42: the blind ops live on
+    /// [`Hook`] and nowhere inline): no public input, nothing to go stale.
+    /// `c` lowers the delta's limbs; nothing is emitted until the hook is
+    /// attached with `c.then`.
+    fn combine(c: &mut Circuit3, hook: Hook, acc: &Self::Acc, delta: &S) -> Hook;
+    /// `snapshot[key] = acc` appended to `hook`, blind, one copy per
+    /// component.
+    fn snapshot<K: LedgerRepr>(
+        c: &mut Circuit3,
+        hook: Hook,
+        acc: &Self::Acc,
+        snapshot: &Self::Snapshot<K>,
+        key: &K,
+    ) -> Hook;
     /// `snapshot[key]`, a STABLE read: the entry is written once, at the
     /// snapshot, and never changes, so its `popeq` cannot go stale.
-    fn lookup<K: LedgerRepr>(c: &mut Circuit3, snapshot: &Self::Snapshot<K>, key: &K) -> S;
+    fn lookup<K: LedgerRepr>(c: &mut Circuit3, snapshot: &Self::Snapshot<K>, key: &K) -> Assumed<S>;
     /// Remove `snapshot[key]` in every component.
     fn remove<K: LedgerRepr>(c: &mut Circuit3, snapshot: &Self::Snapshot<K>, key: &K);
     /// [`Self::lookup`] then [`Self::remove`].
-    fn take<K: LedgerRepr>(c: &mut Circuit3, snapshot: &Self::Snapshot<K>, key: &K) -> S {
+    fn take<K: LedgerRepr>(c: &mut Circuit3, snapshot: &Self::Snapshot<K>, key: &K) -> Assumed<S> {
         let value = Self::lookup(c, snapshot, key);
         Self::remove(c, snapshot, key);
         value
@@ -155,14 +167,15 @@ macro_rules! one_cell {
 
         fn snapshot<K: LedgerRepr>(
             c: &mut Circuit3,
+            hook: Hook,
             acc: &Self::Acc,
             snapshot: &Self::Snapshot<K>,
             key: &K,
-        ) {
-            acc.snapshot_into(c, snapshot, key)
+        ) -> Hook {
+            hook.copy(acc, snapshot, Lowered(key.ledger_value(c)))
         }
 
-        fn lookup<K: LedgerRepr>(c: &mut Circuit3, snapshot: &Self::Snapshot<K>, key: &K) -> $S {
+        fn lookup<K: LedgerRepr>(c: &mut Circuit3, snapshot: &Self::Snapshot<K>, key: &K) -> Assumed<$S> {
             snapshot.lookup(c, key)
         }
 
@@ -179,9 +192,8 @@ macro_rules! uint_steps {
         impl Primitive<Uint<$bits, Public>> for Add {
             one_cell!(Uint<$bits, Public>);
 
-            fn combine_blind(c: &mut Circuit3, acc: &Self::Acc, delta: &Uint<$bits, Public>) {
-                let delta = delta.ledger_value(c);
-                emit(c, &cell_add_at(&acc.ledger_path(), &delta));
+            fn combine(c: &mut Circuit3, hook: Hook, acc: &Self::Acc, delta: &Uint<$bits, Public>) -> Hook {
+                hook.add(acc, Lowered(delta.ledger_value(c)))
             }
         }
 
@@ -198,9 +210,8 @@ macro_rules! uint_steps {
         impl Primitive<Uint<$bits, Public>> for Max {
             one_cell!(Uint<$bits, Public>);
 
-            fn combine_blind(c: &mut Circuit3, acc: &Self::Acc, delta: &Uint<$bits, Public>) {
-                let delta = delta.ledger_value(c);
-                emit(c, &cell_max_at(&acc.ledger_path(), &delta));
+            fn combine(c: &mut Circuit3, hook: Hook, acc: &Self::Acc, delta: &Uint<$bits, Public>) -> Hook {
+                hook.max(acc, Lowered(delta.ledger_value(c)))
             }
         }
 
@@ -218,9 +229,8 @@ macro_rules! uint_steps {
         impl Primitive<Uint<$bits, Public>> for Min {
             one_cell!(Uint<$bits, Public>);
 
-            fn combine_blind(c: &mut Circuit3, acc: &Self::Acc, delta: &Uint<$bits, Public>) {
-                let delta = delta.ledger_value(c);
-                emit(c, &cell_min_at(&acc.ledger_path(), &delta));
+            fn combine(c: &mut Circuit3, hook: Hook, acc: &Self::Acc, delta: &Uint<$bits, Public>) -> Hook {
+                hook.min(acc, Lowered(delta.ledger_value(c)))
             }
         }
 
@@ -242,9 +252,8 @@ uint_steps!(8, 16, 32, 64);
 impl Primitive<Bool<Public>> for And {
     one_cell!(Bool<Public>);
 
-    fn combine_blind(c: &mut Circuit3, acc: &Self::Acc, delta: &Bool<Public>) {
-        let delta = delta.ledger_value(c);
-        emit(c, &cell_and_at(&acc.ledger_path(), &delta));
+    fn combine(c: &mut Circuit3, hook: Hook, acc: &Self::Acc, delta: &Bool<Public>) -> Hook {
+        hook.and(acc, Lowered(delta.ledger_value(c)))
     }
 }
 
@@ -261,9 +270,8 @@ impl Monoid<Bool<Public>> for And {
 impl Primitive<Bool<Public>> for Or {
     one_cell!(Bool<Public>);
 
-    fn combine_blind(c: &mut Circuit3, acc: &Self::Acc, delta: &Bool<Public>) {
-        let delta = delta.ledger_value(c);
-        emit(c, &cell_or_at(&acc.ledger_path(), &delta));
+    fn combine(c: &mut Circuit3, hook: Hook, acc: &Self::Acc, delta: &Bool<Public>) -> Hook {
+        hook.or(acc, Lowered(delta.ledger_value(c)))
     }
 }
 
@@ -284,8 +292,8 @@ impl Monoid<Bool<Public>> for Or {
 impl<S: LedgerRepr> Primitive<S> for Last {
     one_cell!(S);
 
-    fn combine_blind(c: &mut Circuit3, acc: &Self::Acc, delta: &S) {
-        acc.write(c, delta)
+    fn combine(c: &mut Circuit3, hook: Hook, acc: &Self::Acc, delta: &S) -> Hook {
+        hook.write(acc, Lowered(delta.ledger_value(c)))
     }
 }
 
@@ -314,19 +322,25 @@ impl<S: LedgerRepr> Primitive<S> for First {
         LedgerMap::at_block(total, start)
     }
 
-    fn combine_blind(c: &mut Circuit3, acc: &Self::Acc, delta: &S) {
-        let delta = delta.ledger_value(c);
-        emit(
-            c,
-            &cell_write_first_at(&acc.value.ledger_path(), &acc.written.ledger_path(), &delta),
-        );
+    /// `if_unset(written, |h| h.write(value, Δ).write(written, true))` —
+    /// the first-write is a branch over two plain writes, as the design
+    /// says; the same ops `minocrab_ledger::cell_write_first_at` spells.
+    fn combine(c: &mut Circuit3, hook: Hook, acc: &Self::Acc, delta: &S) -> Hook {
+        let delta = Lowered(delta.ledger_value(c));
+        hook.if_unset(&acc.written, |h| h.write(&acc.value, delta).write(&acc.written, true))
     }
 
-    fn snapshot<K: LedgerRepr>(c: &mut Circuit3, acc: &Self::Acc, snapshot: &Self::Snapshot<K>, key: &K) {
-        acc.value.snapshot_into(c, snapshot, key)
+    fn snapshot<K: LedgerRepr>(
+        c: &mut Circuit3,
+        hook: Hook,
+        acc: &Self::Acc,
+        snapshot: &Self::Snapshot<K>,
+        key: &K,
+    ) -> Hook {
+        hook.copy(&acc.value, snapshot, Lowered(key.ledger_value(c)))
     }
 
-    fn lookup<K: LedgerRepr>(c: &mut Circuit3, snapshot: &Self::Snapshot<K>, key: &K) -> S {
+    fn lookup<K: LedgerRepr>(c: &mut Circuit3, snapshot: &Self::Snapshot<K>, key: &K) -> Assumed<S> {
         snapshot.lookup(c, key)
     }
 
@@ -365,16 +379,24 @@ macro_rules! tuple_steps {
                 },)+)
             }
 
-            fn combine_blind(c: &mut Circuit3, acc: &Self::Acc, delta: &($($s,)+)) {
-                $( $p::combine_blind(c, &acc.$i, &delta.$i); )+
+            fn combine(c: &mut Circuit3, hook: Hook, acc: &Self::Acc, delta: &($($s,)+)) -> Hook {
+                $( let hook = $p::combine(c, hook, &acc.$i, &delta.$i); )+
+                hook
             }
 
-            fn snapshot<K: LedgerRepr>(c: &mut Circuit3, acc: &Self::Acc, snapshot: &Self::Snapshot<K>, key: &K) {
-                $( $p::snapshot(c, &acc.$i, &snapshot.$i, key); )+
+            fn snapshot<K: LedgerRepr>(
+                c: &mut Circuit3,
+                hook: Hook,
+                acc: &Self::Acc,
+                snapshot: &Self::Snapshot<K>,
+                key: &K,
+            ) -> Hook {
+                $( let hook = $p::snapshot(c, hook, &acc.$i, &snapshot.$i, key); )+
+                hook
             }
 
-            fn lookup<K: LedgerRepr>(c: &mut Circuit3, snapshot: &Self::Snapshot<K>, key: &K) -> ($($s,)+) {
-                ($( $p::lookup(c, &snapshot.$i, key), )+)
+            fn lookup<K: LedgerRepr>(c: &mut Circuit3, snapshot: &Self::Snapshot<K>, key: &K) -> Assumed<($($s,)+)> {
+                Assumed::of_read(($( $p::lookup(c, &snapshot.$i, key).into_inner(), )+))
             }
 
             fn remove<K: LedgerRepr>(c: &mut Circuit3, snapshot: &Self::Snapshot<K>, key: &K) {
@@ -388,7 +410,7 @@ macro_rules! tuple_steps {
             }
 
             fn combine(c: &mut Circuit3, a: ($($s,)+), b: ($($s,)+)) -> ($($s,)+) {
-                ($( $p::combine(c, a.$i, b.$i), )+)
+                ($( <$p as Monoid<$s>>::combine(c, a.$i, b.$i), )+)
             }
         }
     )*};
@@ -400,7 +422,3 @@ tuple_steps! {
     (A SA 0, B SB 1, C SC 2, D SD 3),
 }
 
-// `cell_write_at` is what `Last` is; named here so the table above and the
-// import list agree on what this module emits.
-#[allow(dead_code)]
-const _LAST_IS_A_CELL_WRITE: fn(&[minocrab_ledger::LedgerKey], &minocrab_ledger::LedgerValue) -> Vec<minocrab_ledger::ImpactOp> = cell_write_at;

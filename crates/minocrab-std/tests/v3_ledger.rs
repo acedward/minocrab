@@ -176,7 +176,7 @@ fn the_guard_free_methods_are_the_ops_with_an_immediate_guard() {
         DEMO.event_map.remove(&mut c, &key);
         let size = DEMO.event_map.size(&mut c);
         let empty = DEMO.event_map.is_empty(&mut c);
-        let addr = DEMO.evm_address.read(&mut c);
+        let addr = DEMO.evm_address.read(&mut c).stale(&mut c);
         DEMO.evm_address.write(&mut c, &addr);
         let count = DEMO.initialized.read(&mut c);
         DEMO.request_nonce.increment(&mut c, 1);
@@ -232,7 +232,7 @@ fn the_point_cell_is_the_hand_written_typed_gate() {
 
     let typed = {
         let mut c = Circuit3::new();
-        let key = DEMO.mpc_key.read(&mut c);
+        let key = DEMO.mpc_key.read(&mut c).stale(&mut c);
         DEMO.mpc_key.write(&mut c, &key);
         c.finish(true)
     };
@@ -318,9 +318,9 @@ fn the_scoped_map_reads_are_the_guarded_ops() {
 fn the_cell_and_counter_methods_are_the_explicit_ops() {
     let typed = {
         let mut c = Circuit3::new();
-        let addr = DEMO.evm_address.read(&mut c);
+        let addr = DEMO.evm_address.read(&mut c).stale(&mut c);
         DEMO.evm_address.write(&mut c, &addr);
-        let chain = DEMO.chain_id.read(&mut c);
+        let chain = DEMO.chain_id.read(&mut c).stale(&mut c);
         DEMO.chain_id.write(&mut c, &chain);
         let count = DEMO.initialized.read(&mut c);
         DEMO.request_nonce.increment(&mut c, 1);
@@ -397,7 +397,7 @@ mod derived_repr {
             hi: c.constant(1u64),
             lo: c.constant(2u64),
         };
-        let env = ENVS.lookup(&mut c, &key);
+        let env = ENVS.lookup(&mut c, &key).stale(&mut c);
         let read: Vec<_> = env.limbs(&mut c);
         assert_eq!(read.len(), repr_limbs::<Env>());
         let rebuilt = Env::from_limbs(read.clone());

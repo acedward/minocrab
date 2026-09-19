@@ -57,6 +57,7 @@ pub fn kernel_balance(
         BOOL_ATOM
     };
     let (wires, value) = mint_read(c, vec![result_atom]);
+    label_read(c, &value, "a kernel balance read", &[]);
     let zero = LedgerValue::new(vec![U128_ATOM], vec![ImpactElem::Imm(Fr::from(0u64))]);
     // `greaterThan` pushes the amount BEFORE the lookup and ends with a bare
     // `lt`, which is how compactc turns `<` into `>` without a `gt` opcode —
@@ -111,6 +112,7 @@ pub fn kernel_block_time(
     greater: bool,
 ) -> Wire3<FieldT, Public> {
     let (wires, value) = mint_read(c, vec![BOOL_ATOM]);
+    label_read(c, &value, "a kernel block-time comparison", &[]);
     let block_time = ImpactOp::constant(&Op::Idx {
         cached: true,
         push_path: false,
@@ -142,6 +144,7 @@ pub fn kernel_block_time(
 /// the contract's own address as `Bytes<32>` `[hi, lo]` wires.
 pub fn kernel_self(c: &mut Circuit3) -> [Wire3<FieldT, Public>; 2] {
     let (wires, value) = mint_read(c, vec![AlignmentAtom::Bytes { length: 32 }]);
+    label_read(c, &value, "the kernel self read", &[]);
     let idx_context = ImpactOp::constant(&Op::Idx {
         cached: true,
         push_path: false,

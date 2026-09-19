@@ -41,7 +41,7 @@ use minocrab::{Private, Public};
 use minocrab_ledger::{XcallCommitment, XcallEntryPointHash};
 use minocrab_std::v3::blind::{Add, Max};
 use minocrab_std::v3::{
-    label, own_public_key, repr_limbs, Disclose, DisclosureLabel, FieldPath, LedgerRepr,
+    label, own_public_key, repr_limbs, Assumed, Disclose, DisclosureLabel, FieldPath, LedgerRepr, ProofWires,
     LedgerWidth, Stream, StreamSpec, Uint, ZswapCoinPublicKey,
 };
 use signet_signer_interface::RequestId;
@@ -100,6 +100,13 @@ pub struct Outstanding<Env> {
     pub env: Env,
     /// Last seen at the call, post-step.
     pub seen: Uint<64, Public>,
+}
+
+impl<Env: ProofWires> ProofWires for Outstanding<Env> {
+    fn push_wires(&self, out: &mut Vec<minocrab::v3::Val>) {
+        self.env.push_wires(out);
+        self.seen.push_wires(out);
+    }
 }
 
 impl<Env: LedgerRepr> LedgerRepr for Outstanding<Env> {
@@ -193,7 +200,7 @@ impl<F: Filing, Env: LedgerRepr, const WORDS: usize> LedgerWidth for Outbox<F, E
     const KINDS: &'static [u8] = &[F::KIND];
 }
 
-impl<F: Filing, Env: LedgerRepr, const WORDS: usize> Outbox<F, Env, WORDS>
+impl<F: Filing, Env: LedgerRepr + ProofWires, const WORDS: usize> Outbox<F, Env, WORDS>
 where
     Ret<Called<F>>: Attestable,
 {
@@ -238,7 +245,12 @@ where
     /// `file_request` is the protocol record's, see the module docs.)
     pub fn emit(&self, c: &mut Circuit3, handle: Handle) -> RequestId<Public> {
         let handle = handle.disclose_as::<HandleEmitted>(c);
-        let (QueueEntry { pre, env }, (nonce, seen)) = self.stream.take(c, &handle);
+        // Both entries were written once at the call and are removed here;
+        // the environment and the last seen re-enter the ledger under the
+        // request id, so the reads are named as assumed.
+        let (entry, state) = self.stream.take(c, &handle);
+        let QueueEntry { pre, env } = entry.stale(c);
+        let (nonce, seen) = state.stale(c);
         let tx = build_tx_from_words::<Called<F>, WORDS>(
             c,
             pre.callee(),
@@ -306,7 +318,7 @@ where
     }
 }
 
-impl<F: Filing, E: LedgerRepr, const WORDS: usize> Outbox<F, HandleOwned<E>, WORDS>
+impl<F: Filing, E: LedgerRepr + ProofWires, const WORDS: usize> Outbox<F, HandleOwned<E>, WORDS>
 where
     Ret<Called<F>>: Attestable,
 {
@@ -339,7 +351,7 @@ where
         &self,
         c: &mut Circuit3,
         ticket: Failed<F>,
-    ) -> (ZswapCoinPublicKey<Public>, Outstanding<HandleOwned<E>>, Ret<Called<F>>) {
+    ) -> (ZswapCoinPublicKey<Public>, Assumed<Outstanding<HandleOwned<E>>>, Ret<Called<F>>) {
         let outcome = self.pending.refund(c, ticket);
         let sk = common::witness_sk(c);
         let env = outcome.env;

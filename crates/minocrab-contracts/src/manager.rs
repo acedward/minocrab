@@ -44,6 +44,7 @@ use minocrab::{Alignment, AlignmentAtom, AlignmentSegment, Fr, Private, Public};
 use minocrab_std::v3::kernel;
 use minocrab_std::v3::kernel::SelfAddress;
 use minocrab_std::v3::{
+    Assumed,
     CoinColor, CoinNonce,
     contract, coin_commitment_to_contract, coin_nullifier_contract, ge, greater_than as gt, is_true, label, le,
     Bool, Bytes, CircuitArg, CoinRecipient, ContractAddress, Disclose, Discloses, Either, Ledger,
@@ -248,11 +249,11 @@ fn balance_at(
     c: &mut Circuit3,
     map: &LedgerMap<B32<Public>, Uint<128, Public>>,
     k: &B32<Public>,
-) -> Wire3<FieldT, Public> {
+) -> Assumed<Wire3<FieldT, Public>> {
     let member = map.member(c, k).field();
     let key = k.ledger_value(c);
     let atoms = <Uint<128, Public> as LedgerRepr>::atoms();
-    guarded_map_lookup_field(c, member, map.index(), &key, atoms)
+    Assumed::of_read(guarded_map_lookup_field(c, member, map.index(), &key, atoms))
 }
 
 /// The one Impact op [`LedgerMap::lookup`] emits, under an EXPLICIT guard
@@ -504,7 +505,7 @@ impl Manager {
         owner: B32<Private>,
     ) -> Discloses<(QueriedAccount,), Bool<Public>> {
         let owner = owner.disclose_as::<QueriedAccount>(c);
-        Discloses::of(MANAGER.accounts.member(c, &owner))
+        Discloses::of(*MANAGER.accounts.member(c, &owner))
     }
 
     /// `export circuit accountRecord(account: Bytes<32>): AccountRecord` — one
@@ -586,7 +587,7 @@ impl Manager {
         let colour = colour.disclose_as::<QueriedColour>(c);
         let k = shielded_key(c, &owner, &colour);
         let v = balance_at(c, &MANAGER.shielded_balances, &k);
-        Discloses::of(Uint::from_field_unchecked(v))
+        Discloses::of(Uint::from_field_unchecked(*v))
     }
 
     /// `export circuit unshieldedAccountBalance(owner, colour): Uint<128>`.
@@ -600,7 +601,7 @@ impl Manager {
         let colour = colour.disclose_as::<QueriedColour>(c);
         let k = unshielded_key(c, &owner, &colour);
         let v = balance_at(c, &MANAGER.unshielded_balances, &k);
-        Discloses::of(Uint::from_field_unchecked(v))
+        Discloses::of(Uint::from_field_unchecked(*v))
     }
 
     /// `export circuit poolValue(colour): Uint<128>` — the pooled coin's value,
@@ -623,7 +624,7 @@ impl Manager {
         colour: CoinColor<Private>,
     ) -> Discloses<(QueriedColour,), Bool<Public>> {
         let col = colour.disclose_as::<QueriedColour>(c);
-        Discloses::of(MANAGER.pools.member(c, &col))
+        Discloses::of(*MANAGER.pools.member(c, &col))
     }
 
     /// `export circuit depositShielded(coin: ShieldedCoinInfo, account:
@@ -685,7 +686,7 @@ impl Manager {
         // shieldedBalances.insert(shieldedKey(acct, c.color),
         //   (shieldedBalanceOf(acct, c.color) + c.value) as Uint<128>)
         let k = shielded_key(c, &acct, &coin.color);
-        let prior = balance_at(c, &MANAGER.shielded_balances, &k);
+        let prior = balance_at(c, &MANAGER.shielded_balances, &k).stale(c);
         let sum = c.add(prior, coin.value);
         let new_balance = Uint::<128, Public>::from_field_unchecked(sum);
         new_balance.constrain_input(c);
@@ -715,7 +716,7 @@ impl Manager {
         kernel::receive_unshielded(c, col, amt);
 
         let k = unshielded_key(c, &acct, &col);
-        let prior = balance_at(c, &MANAGER.unshielded_balances, &k);
+        let prior = balance_at(c, &MANAGER.unshielded_balances, &k).stale(c);
         let sum = c.add(prior, amt.field());
         let new_balance = Uint::<128, Public>::from_field_unchecked(sum);
         new_balance.constrain_input(c);
@@ -756,7 +757,7 @@ impl Manager {
                 lo: c.constant(0u64),
             };
             c.when(not_native_reg, |c| {
-                d = MANAGER.deployment_domain.read(c);
+                d = *MANAGER.deployment_domain.read(c);
             });
             d
         };
@@ -1353,11 +1354,11 @@ fn custody_dispatch(c: &mut Circuit3, p: &PublicPayload, f: &Flags, account: &B3
     let zero = c.constant(0u64);
     let mut s_balance = zero;
     c.when(debit_shielded, |c| {
-        s_balance = balance_at(c, &MANAGER.shielded_balances, &debit_key);
+        s_balance = balance_at(c, &MANAGER.shielded_balances, &debit_key).stale(c);
     });
     let mut u_balance = zero;
     c.when(debit_unshielded, |c| {
-        u_balance = balance_at(c, &MANAGER.unshielded_balances, &debit_key);
+        u_balance = balance_at(c, &MANAGER.unshielded_balances, &debit_key).stale(c);
     });
     let debit_balance = c.add(s_balance, u_balance);
     let covered = ge(
@@ -1581,7 +1582,7 @@ fn custody_dispatch(c: &mut Circuit3, p: &PublicPayload, f: &Flags, account: &B3
         let credit_key = family_key(c, &credit_acct, &credit_colour, &credit_tag);
         let credit_value = c.cond_select(f.is6, p.want_amount, val);
         c.when(credit_shielded, |c| {
-            let prior = balance_at(c, &MANAGER.shielded_balances, &credit_key);
+            let prior = balance_at(c, &MANAGER.shielded_balances, &credit_key).stale(c);
             let sum = c.add(prior, credit_value);
             let new_credit = Uint::<128, Public>::from_field_unchecked(sum);
             new_credit.constrain_input(c);
@@ -1589,7 +1590,7 @@ fn custody_dispatch(c: &mut Circuit3, p: &PublicPayload, f: &Flags, account: &B3
         });
         let credit_unshielded = c.not(credit_shielded);
         c.when(credit_unshielded, |c| {
-            let prior = balance_at(c, &MANAGER.unshielded_balances, &credit_key);
+            let prior = balance_at(c, &MANAGER.unshielded_balances, &credit_key).stale(c);
             let sum = c.add(prior, credit_value);
             let new_credit = Uint::<128, Public>::from_field_unchecked(sum);
             new_credit.constrain_input(c);

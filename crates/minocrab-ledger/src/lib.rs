@@ -61,7 +61,7 @@ pub use calls::{
 };
 pub use impact::{
     atom_limbs, default_value, dup, field_key, idx_key, idx_key_cached, idx_one, idx_path,
-    push_array, push_cell, swap, ImpactOp, LedgerElem, LedgerKey, LedgerValue, VmOp,
+    push_array, push_cell, render_path, swap, ImpactOp, LedgerElem, LedgerKey, LedgerValue, VmOp,
 };
 pub use kernel::{
     kernel_balance, kernel_block_time, kernel_claim_contract_call,
@@ -71,8 +71,9 @@ pub use kernel::{
     BalanceCmp,
 };
 pub use ops::{
-    cell_add_at, cell_and_at, cell_max_at, cell_min_at, cell_or_at, cell_snapshot_into_map_at,
-    cell_write_first_at,
+    branch, cell_add_at, cell_and_at, cell_copy_at, cell_max_at, cell_min_at, cell_or_at,
+    cell_snapshot_into_map_at, cell_sub_at, cell_write_first_at, jmp, lt, map_move_entry_at,
+    member, neg, pop, type_of,
     cell_write, cell_write_at, cell_write_coin, cell_write_coin_at, counter_increment,
     counter_increment_at, counter_reset, counter_reset_at, empty_counter,
     empty_historic_merkle_tree_value, empty_list, empty_map, empty_merkle_tree_value, emit_event,

@@ -39,7 +39,7 @@
 use minocrab_ir::v3::{Arg, IrType, Val};
 use minocrab_ir::Fr;
 
-use super::{AssertMessage, Circuit3};
+use super::{AssertMessage, Circuit3, DeferredImpact, ImpactElem};
 
 /// A guard RESOLVED against the ambient scope — `None` for straight-line
 /// code, otherwise the conjunction of the scope and whatever explicit guard
@@ -124,6 +124,40 @@ impl Circuit3 {
 
     pub(super) fn pop_guard(&mut self) {
         self.guards.pop();
+    }
+
+    // --- deferred emission: the hooks ------------------------------------------------
+
+    /// Queue `ops` for emission after the body, under the ambient guard AS
+    /// IT IS NOW. The one other reader of the ambient stack besides
+    /// [`Circuit3::effect_guard`], and for the same reason: attachment is
+    /// where the hook's guard is decided, and the scope that decides it is
+    /// gone by the time the hook is emitted.
+    #[track_caller]
+    pub(super) fn defer_impact(&mut self, ops: Vec<Vec<ImpactElem>>) {
+        self.refuse_on_chain_in_private_scope("a hook (`c.then`)");
+        let guard = self.ambient();
+        self.deferred.push(DeferredImpact { guard, ops });
+    }
+
+    /// Emit every attached program in attachment order, each under the
+    /// guard captured when it was attached. Called by [`Circuit3::finish`]
+    /// (and by `entry`, right after the body, so the disclosure record
+    /// lists the hooks' operands before the outputs). Must run OUTSIDE any
+    /// scope: the captured guard already carries the scope.
+    pub fn flush_deferred(&mut self) {
+        assert!(
+            self.guards.is_empty(),
+            "hooks are flushed after the body, outside every `when` scope"
+        );
+        let deferred = std::mem::take(&mut self.deferred);
+        for DeferredImpact { guard, ops } in deferred {
+            let guard = EffectGuard(guard.map(Arg::Val));
+            for op in &ops {
+                let args = self.impact_args(op);
+                self.emit_impact(guard, &args);
+            }
+        }
     }
 
     // --- the raw emitters, one each ------------------------------------------------------

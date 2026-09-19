@@ -340,3 +340,16 @@ pub fn idx_key_cached(key: &LedgerValue) -> ImpactOp {
     elems.extend(key.elems.iter().copied());
     ImpactOp(elems)
 }
+
+/// A path in words, for the stale-read backstop's refusal to name a read:
+/// `field 3`, `field 3 / key`, `stack`.
+pub fn render_path(path: &[LedgerKey]) -> String {
+    path.iter()
+        .map(|key| match key {
+            LedgerKey::Field(i) => format!("field {i}"),
+            LedgerKey::Value(_) => "key".to_string(),
+            LedgerKey::Stack => "stack".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" / ")
+}

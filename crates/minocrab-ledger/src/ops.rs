@@ -971,6 +971,76 @@ pub fn cell_snapshot_into_map_at(
     ]
 }
 
+/// The blind CELL-TO-CELL COPY: `dst = src`, the circuit never learning the
+/// value: `idxp dst[..len-1]; push dst[len-1]; dup 2·len(dst)−1; idx src;
+/// ins 1; insc len(dst)−1` — [`cell_write_at`] with its `pushs value`
+/// replaced by the reach-back of [`cell_snapshot_into_map_at`]. After the
+/// container walk and the key push the state sits `2·len(dst) − 1` below
+/// the top (one pair per walked element, then the key), so a copy of it
+/// indexed by `src` is the value the insert takes.
+pub fn cell_copy_at(src: &[LedgerKey], dst: &[LedgerKey]) -> Vec<ImpactOp> {
+    let reach = 2 * dst.len() - 1;
+    assert!(
+        reach <= 15,
+        "cell_copy_at: a destination path of {} elements puts the state {reach} deep, \
+         past the `dup` nibble",
+        dst.len()
+    );
+    let mut ops = idxp_container(dst);
+    ops.push(dst[dst.len() - 1].push_as_cell());
+    ops.push(dup(reach as u8));
+    ops.push(idx_path(false, false, src));
+    ops.push(ins1());
+    ops.extend(insc_container(dst));
+    ops
+}
+
+/// The blind MOVE of a map entry: `map[to] = map[from]; map.remove(from)`,
+/// the circuit never learning the value, and an ABSENT `from` failing the
+/// transaction:
+///
+/// ```text
+/// idxp m; push to; dup 2·len(m)+1; idx m ++ [from];
+/// dup 0; type; push 0; swap 0; sub; pop;
+/// ins 1; insc len(m); <map_remove_at m from>
+/// ```
+///
+/// `idx` of a missing map key yields `Null` rather than failing (`vm.rs`
+/// `idx`: `unwrap_or(StateValue::Null)`), and `ins` would store that
+/// `Null` under `to`. The six middle ops are the presence check: `type`
+/// pushes `0` for a cell and `1` for `Null`, and `0 − type` is a checked
+/// subtraction that underflows — fails the transaction — exactly when the
+/// entry was absent. Six ops rather than a second `member` walk, and total
+/// over every entry type (a `lt`/`eq` probe would decode the value).
+pub fn map_move_entry_at(map: &[LedgerKey], from: &LedgerValue, to: &LedgerValue) -> Vec<ImpactOp> {
+    let reach = 2 * map.len() + 1;
+    assert!(
+        reach <= 15,
+        "map_move_entry_at: a map path of {} elements puts the state {reach} deep, past \
+         the `dup` nibble",
+        map.len()
+    );
+    let zero = LedgerValue::bytes(1, vec![ImpactElem::Imm(Fr::from(0u64))]);
+    let mut entry: Vec<LedgerKey> = map.to_vec();
+    entry.push(LedgerKey::Value(from.clone()));
+    let mut ops = vec![
+        idx_path(false, true, map),
+        push_cell(false, to),
+        dup(reach as u8),
+        idx_path(false, false, &entry),
+        dup(0),
+        type_of(),
+        push_cell(false, &zero),
+        swap(0),
+        ImpactOp::constant(&Op::Sub),
+        pop(),
+        ins1(),
+        insc(map.len()),
+    ];
+    ops.extend(map_remove_at(map, from));
+    ops
+}
+
 /// The blind ADD: `cell = cell + delta` on a `Uint<64>` cell, `delta` a
 /// public circuit value: `idxp f; push delta; add; insc len(f)`.
 ///
@@ -983,6 +1053,19 @@ pub fn cell_add_at(path: &[LedgerKey], delta: &LedgerValue) -> Vec<ImpactOp> {
         idx_path(false, true, path),
         push_cell(false, delta),
         ImpactOp::constant(&Op::Add),
+        insc(path.len()),
+    ]
+}
+
+/// The blind SUB: `cell = cell − delta` on a `Uint<64>` cell:
+/// `idxp f; push delta; sub; insc len(f)`. `sub` pops Δ then the cell and
+/// leaves `cell − Δ` (`vm.rs`: `sub(&b, a)` with `a` the top), and it is
+/// `checked_sub`, so an underflow fails the transaction.
+pub fn cell_sub_at(path: &[LedgerKey], delta: &LedgerValue) -> Vec<ImpactOp> {
+    vec![
+        idx_path(false, true, path),
+        push_cell(false, delta),
+        ImpactOp::constant(&Op::Sub),
         insc(path.len()),
     ]
 }
@@ -1081,4 +1164,47 @@ pub fn cell_write_first_at(
     ops.extend(write_value);
     ops.extend(write_flag);
     ops
+}
+
+// --- the branch-and-compare ops the hooks compose ---------------------------
+//
+// `minocrab_std::v3::hook` builds `if_absent` / `if_below` / `if_unset` out
+// of these and the writes above; they are named here so the stdlib never
+// spells an opcode itself and the encoding stays `Op::field_repr`'s.
+
+/// `branch k`: pop a Boolean cell, skip the next `k` instructions when it
+/// is TRUE.
+pub fn branch(skip: u32) -> ImpactOp {
+    ImpactOp::constant(&Op::Branch { skip })
+}
+
+/// `jmp k`: skip the next `k` instructions.
+pub fn jmp(skip: u32) -> ImpactOp {
+    ImpactOp::constant(&Op::Jmp { skip })
+}
+
+/// `member`: pop a key then a map, push whether the map holds the key.
+pub fn member() -> ImpactOp {
+    ImpactOp::constant(&Op::Member)
+}
+
+/// `lt`: pop `b` then `a` (both `Uint<64>` cells), push `a < b`.
+pub fn lt() -> ImpactOp {
+    ImpactOp::constant(&Op::Lt)
+}
+
+/// `neg`: pop a Boolean cell, push its negation.
+pub fn neg() -> ImpactOp {
+    ImpactOp::constant(&Op::Neg)
+}
+
+/// `pop`: discard the top of the stack.
+pub fn pop() -> ImpactOp {
+    ImpactOp::constant(&Op::Pop)
+}
+
+/// `type`: pop a value, push its kind as a `bytes<1>` cell — `0` for a
+/// cell, `1` for `Null`, `2` for a map (`vm.rs`).
+pub fn type_of() -> ImpactOp {
+    ImpactOp::constant(&Op::Type)
 }

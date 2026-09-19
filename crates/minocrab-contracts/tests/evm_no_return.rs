@@ -122,8 +122,8 @@ fn refund_tether(
     c: &mut Circuit3,
     ticket: Failed<Tether>,
 ) -> Discloses<(Settled, Recipient)> {
-    let (_owner, Amount { amount: _amount }, ()) =
-        WALLET.tethers.refund_to_owner::<Recipient>(c, ticket);
+    let (_owner, env, ()) = WALLET.tethers.refund_to_owner::<Recipient>(c, ticket);
+    let Amount { amount: _amount } = *env;
     Discloses::of(())
 }
 

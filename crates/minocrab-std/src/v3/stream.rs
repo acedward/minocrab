@@ -83,7 +83,9 @@ use core::marker::PhantomData;
 use minocrab::v3::{Circuit3, Select};
 use minocrab::Public;
 
+use super::assumed::{Assumed, ProofWires};
 use super::blind::{Add, And, First, Last, Max, Min, Or, Primitive};
+use super::hook::Hook;
 use super::ledger::{LedgerCell, LedgerMap, LedgerRepr, LedgerWidth};
 use super::predicate::{is_true, not};
 use super::NonEmpty;
@@ -119,7 +121,7 @@ pub trait Step<P: StreamSpec>: Sized {
     const CONTENTION_FREE: bool;
 
     fn insert(s: &Stream<P>, c: &mut Circuit3, key: &P::Key, body: &P::Body);
-    fn take(s: &Stream<P>, c: &mut Circuit3, key: &P::Key) -> (P::Body, P::State);
+    fn take(s: &Stream<P>, c: &mut Circuit3, key: &P::Key) -> (Assumed<P::Body>, Assumed<P::State>);
     fn combine(s: &Stream<P>, c: &mut Circuit3, delta: Self::Delta);
 }
 
@@ -174,7 +176,7 @@ impl<P: StreamSpec> Stream<P> {
 
     /// TAKE `key`'s element: the body and the state it was sequenced with,
     /// removing everything read. Asserts the key is present.
-    pub fn take(&self, c: &mut Circuit3, key: &P::Key) -> (P::Body, P::State) {
+    pub fn take(&self, c: &mut Circuit3, key: &P::Key) -> (Assumed<P::Body>, Assumed<P::State>) {
         P::Step::take(self, c, key)
     }
 
@@ -213,9 +215,10 @@ macro_rules! primitive_steps {
                 + <$ty as Primitive<P::State>>::SNAPSHOT_FIELDS;
             const CONTENTION_FREE: bool = true;
 
-            /// Assert not member; `bodies[k] = body`; per component: blind
-            /// `acc ⊕= delta(head(body))`, then blind `snapshot[k] = acc` —
-            /// the stored state is the post-step value.
+            /// Assert not member; `bodies[k] = body` inline; then, as ONE
+            /// attached hook, per component: blind `acc ⊕= delta(head(body))`,
+            /// then blind `snapshot[k] = acc` — the stored state is the
+            /// post-step value.
             fn insert(s: &Stream<P>, c: &mut Circuit3, key: &P::Key, body: &P::Body) {
                 let bodies = s.bodies();
                 let present = bodies.member(c, key);
@@ -228,14 +231,17 @@ macro_rules! primitive_steps {
                     s.total,
                     s.start + 1 + <$ty as Primitive<P::State>>::ACC_FIELDS,
                 );
-                <$ty as Primitive<P::State>>::combine_blind(c, &acc, &delta);
-                <$ty as Primitive<P::State>>::snapshot(c, &acc, &snapshot, key);
+                // The blind half is a hook (M42): it runs after the body,
+                // on whatever the accumulator holds at landing.
+                let hook = <$ty as Primitive<P::State>>::combine(c, Hook::new(), &acc, &delta);
+                let hook = <$ty as Primitive<P::State>>::snapshot(c, hook, &acc, &snapshot, key);
+                c.then(hook);
             }
 
             /// Assert member; lookup and remove the body and each
             /// component's snapshot entry — every read is of an entry
             /// written once.
-            fn take(s: &Stream<P>, c: &mut Circuit3, key: &P::Key) -> (P::Body, P::State) {
+            fn take(s: &Stream<P>, c: &mut Circuit3, key: &P::Key) -> (Assumed<P::Body>, Assumed<P::State>) {
                 let bodies = s.bodies();
                 let present = bodies.member(c, key);
                 c.assert(is_true(present).message("Stream key not present"));
@@ -251,7 +257,8 @@ macro_rules! primitive_steps {
 
             fn combine(s: &Stream<P>, c: &mut Circuit3, delta: P::State) {
                 let acc = <$ty as Primitive<P::State>>::acc_at_block(s.total, s.start + 1);
-                <$ty as Primitive<P::State>>::combine_blind(c, &acc, &delta);
+                let hook = <$ty as Primitive<P::State>>::combine(c, Hook::new(), &acc, &delta);
+                c.then(hook);
             }
         }
     )*};
@@ -270,8 +277,8 @@ impl<P, F, const REST: usize> Step<P> for Serial<F, REST>
 where
     P: StreamSpec<Step = Serial<F, REST>>,
     F: Fold<P::State>,
-    P::Head: LedgerRepr,
-    P::State: LedgerRepr + Clone + Select<Public>,
+    P::Head: LedgerRepr + ProofWires,
+    P::State: LedgerRepr + ProofWires + Clone + Select<Public>,
 {
     type Delta = F::Delta;
     const WIDTH: usize = 3;
@@ -288,7 +295,7 @@ where
     }
 
     /// Assert staged; lookup and remove the staged state and the body.
-    fn take(s: &Stream<P>, c: &mut Circuit3, key: &P::Key) -> (P::Body, P::State) {
+    fn take(s: &Stream<P>, c: &mut Circuit3, key: &P::Key) -> (Assumed<P::Body>, Assumed<P::State>) {
         let staged = s.staged();
         let present = staged.member(c, key);
         c.assert(is_true(present).message("Stream key not sequenced"));
@@ -300,10 +307,11 @@ where
         (body, state)
     }
 
-    /// `popeq acc; step; write` — CONTENDED.
+    /// `popeq acc; step; write` — CONTENDED, and the write says so:
+    /// `.stale(c)` names the read the write assumes current.
     fn combine(s: &Stream<P>, c: &mut Circuit3, delta: F::Delta) {
         let acc = s.acc();
-        let state = acc.read(c);
+        let state = acc.read(c).stale(c);
         let next = F::step(c, state, delta);
         acc.write(c, &next);
     }
@@ -313,8 +321,8 @@ impl<P, F, const REST: usize> Stream<P>
 where
     P: StreamSpec<Step = Serial<F, REST>>,
     F: Fold<P::State>,
-    P::Head: LedgerRepr,
-    P::State: LedgerRepr + Clone + Select<Public>,
+    P::Head: LedgerRepr + ProofWires,
+    P::State: LedgerRepr + ProofWires + Clone + Select<Public>,
 {
     /// Handle → head. Field `start + 1`.
     fn heads(&self) -> LedgerMap<P::Key, P::Head> {
@@ -341,11 +349,14 @@ where
         let heads = self.heads();
         let staged = self.staged();
         let acc = self.acc();
-        let state = acc.read(c);
+        // The one contended read, named as such; the head is an entry
+        // written once and removed here, named too since the staged state
+        // is computed from it.
+        let state = acc.read(c).stale(c);
         let state = keys.fold(c, state, |c, s, key| {
             let queued = heads.member(c, key);
             c.assert(is_true(queued).message("Stream key not queued"));
-            let head = heads.lookup(c, key);
+            let head = heads.lookup(c, key).stale(c);
             heads.remove(c, key);
             let delta = P::delta(c, &head);
             let next = F::step(c, s, delta);

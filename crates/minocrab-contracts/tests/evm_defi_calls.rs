@@ -185,8 +185,8 @@ fn refund_mint(
     c: &mut Circuit3,
     ticket: Failed<MintShares>,
 ) -> Discloses<(Settled, Recipient)> {
-    let (_owner, Amount { amount: _ }, _assets) =
-        POSITIONS.mints.refund_to_owner::<Recipient>(c, ticket);
+    let (_owner, env, _assets) = POSITIONS.mints.refund_to_owner::<Recipient>(c, ticket);
+    let Amount { amount: _ } = *env;
     Discloses::of(())
 }
 

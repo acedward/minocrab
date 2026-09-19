@@ -426,9 +426,11 @@ fn assemble_request<const WORDS: usize, const LEN_OUT: usize, const LEN_RESPOND:
     output_schema: &[u8],
     respond_schema: &[u8],
 ) -> signet::SignBidirectionalEvent<Private, WORDS, LEN_OUT, LEN_RESPOND> {
-    let request_nonce = VAULT.signet_request_nonce.read(c);
+    // The request nonce is read, hashed into the record, and bumped: the
+    // one read-modify-write every filing makes, named as such (M42 B).
+    let request_nonce = VAULT.signet_request_nonce.read(c).stale(c);
     let sender = kernel::self_address(c).private();
-    let caip2 = VAULT.caip2_id.read(c).private();
+    let caip2 = VAULT.caip2_id.read(c).stale(c).private();
     let output_schema = BytesN::<Private, LEN_OUT>::literal(c, output_schema);
     let respond_schema = BytesN::<Private, LEN_RESPOND>::literal(c, respond_schema);
     signet::construct_sign_bidirectional_event(
@@ -785,7 +787,7 @@ impl Vault {
         assert_initialised(c);
 
         // approve(stataToken, 2^128−1): the spender is the wrapper.
-        let stata_token = VAULT.stata_token.read(c);
+        let stata_token = VAULT.stata_token.read(c).stale(c);
         let word0 = signet::evm_address_abi_word(c, stata_token.field().private());
         let word1 = unlimited_allowance_word(c);
         let calldata = calldata(c, &APPROVE_SELECTOR, [word0, word1]);
@@ -793,8 +795,8 @@ impl Vault {
         // Contract-FIXED gas envelope; `to` is the underlying token (read where
         // the struct literal names it, after `chainId`).
         let gas = fixed_gas(c, ERC20_CALL_GAS);
-        let chain_id = VAULT.evm_chain_id.read(c);
-        let stata_underlying = VAULT.stata_underlying.read(c);
+        let chain_id = VAULT.evm_chain_id.read(c).stale(c);
+        let stata_underlying = VAULT.stata_underlying.read(c).stale(c);
         let tx = tx_params(c, chain_id, evm_nonce.field(), gas, stata_underlying.field().private(), calldata);
 
         let path = common::SigningPath::vault_path(c).private();
@@ -831,14 +833,14 @@ impl Vault {
         });
 
         // approve(uniswapRouter, 2^128−1): the spender is the pinned router.
-        let router = VAULT.uniswap_router.read(c);
+        let router = VAULT.uniswap_router.read(c).stale(c);
         let word0 = signet::evm_address_abi_word(c, router.field().private());
         let word1 = unlimited_allowance_word(c);
         let calldata = calldata(c, &APPROVE_SELECTOR, [word0, word1]);
 
         // Contract-FIXED gas envelope; `to` is the (disclosed) ERC20 itself.
         let gas = fixed_gas(c, ERC20_CALL_GAS);
-        let chain_id = VAULT.evm_chain_id.read(c);
+        let chain_id = VAULT.evm_chain_id.read(c).stale(c);
         let erc20 = erc20_address.disclose_as::<ApprovedErc20>(c);
         let tx = tx_params(c, chain_id, evm_nonce.field(), gas, erc20.field().private(), calldata);
 
@@ -900,7 +902,7 @@ impl Vault {
 
         // The pinned recipient stops a client having the MPC sign a transfer to
         // themselves: transfer(vaultEvmAddress, amount).
-        let vault_evm = VAULT.vault_evm_address.read(c);
+        let vault_evm = VAULT.vault_evm_address.read(c).stale(c);
         let word0 = signet::evm_address_abi_word(c, vault_evm.field().private());
         let word1 = signet::numeric_abi_word(c, deposit_request.amount.field());
         let calldata = calldata(c, &TRANSFER_SELECTOR, [word0, word1]);
@@ -911,7 +913,7 @@ impl Vault {
             max_fee_per_gas.field(),
             gas_limit.field(),
         ];
-        let chain_id = VAULT.evm_chain_id.read(c);
+        let chain_id = VAULT.evm_chain_id.read(c).stale(c);
         let tx = tx_params(c, chain_id, evm_nonce.field(), gas, deposit_request.erc20_address.field(), calldata);
 
         let request: VaultEvent<Private> = assemble_request(
@@ -1085,7 +1087,7 @@ impl Vault {
         let word1 = signet::numeric_abi_word(c, amount);
         let calldata = calldata(c, &TRANSFER_SELECTOR, [word0, word1]);
         let gas = fixed_gas(c, ERC20_CALL_GAS);
-        let chain_id = VAULT.evm_chain_id.read(c);
+        let chain_id = VAULT.evm_chain_id.read(c).stale(c);
         let tx = tx_params(c, chain_id, evm_nonce.field(), gas, erc20.field().private(), calldata);
 
         let path = common::SigningPath::vault_path(c).private();
@@ -1266,7 +1268,7 @@ impl Vault {
         let word0 = signet::evm_address_abi_word(c, token_in.field().private());
         let word1 = signet::evm_address_abi_word(c, token_out.field().private());
         let word2 = signet::numeric_abi_word(c, swap_request.fee.field());
-        let vault_evm = VAULT.vault_evm_address.read(c);
+        let vault_evm = VAULT.vault_evm_address.read(c).stale(c);
         let word3 = signet::evm_address_abi_word(c, vault_evm.field().private());
         let word4 = signet::numeric_abi_word(c, amount_out);
         let word5 = signet::numeric_abi_word(c, amount_in_max);
@@ -1282,8 +1284,8 @@ impl Vault {
 
         // Contract-FIXED gas envelope; to = the pinned router.
         let gas = fixed_gas(c, SWAP_GAS);
-        let chain_id = VAULT.evm_chain_id.read(c);
-        let router = VAULT.uniswap_router.read(c);
+        let chain_id = VAULT.evm_chain_id.read(c).stale(c);
+        let router = VAULT.uniswap_router.read(c).stale(c);
         let tx = tx_params(c, chain_id, evm_nonce.field(), gas, router.field().private(), calldata);
 
         let path = common::SigningPath::vault_path(c).private();
@@ -1446,12 +1448,12 @@ impl Vault {
 
         // deposit(amount, vaultEvmAddress) on the wrapper.
         let word0 = signet::numeric_abi_word(c, amount);
-        let vault_evm = VAULT.vault_evm_address.read(c);
+        let vault_evm = VAULT.vault_evm_address.read(c).stale(c);
         let word1 = signet::evm_address_abi_word(c, vault_evm.field().private());
         let calldata = calldata(c, &DEPOSIT_SELECTOR, [word0, word1]);
         let gas = fixed_gas(c, LENDING_GAS);
-        let chain_id = VAULT.evm_chain_id.read(c);
-        let stata_token = VAULT.stata_token.read(c);
+        let chain_id = VAULT.evm_chain_id.read(c).stale(c);
+        let stata_token = VAULT.stata_token.read(c).stale(c);
         let tx = tx_params(c, chain_id, evm_nonce.field(), gas, stata_token.field().private(), calldata);
 
         let path = common::SigningPath::vault_path(c).private();
@@ -1608,14 +1610,14 @@ impl Vault {
         // redeem(shares, vaultEvmAddress, vaultEvmAddress) — the cell is read
         // once per word, as the source spells it.
         let word0 = signet::numeric_abi_word(c, shares);
-        let vault_evm = VAULT.vault_evm_address.read(c);
+        let vault_evm = VAULT.vault_evm_address.read(c).stale(c);
         let word1 = signet::evm_address_abi_word(c, vault_evm.field().private());
-        let vault_evm = VAULT.vault_evm_address.read(c);
+        let vault_evm = VAULT.vault_evm_address.read(c).stale(c);
         let word2 = signet::evm_address_abi_word(c, vault_evm.field().private());
         let calldata = calldata(c, &REDEEM_SELECTOR, [word0, word1, word2]);
         let gas = fixed_gas(c, LENDING_GAS);
-        let chain_id = VAULT.evm_chain_id.read(c);
-        let stata_token = VAULT.stata_token.read(c);
+        let chain_id = VAULT.evm_chain_id.read(c).stale(c);
+        let stata_token = VAULT.stata_token.read(c).stale(c);
         let tx = tx_params(c, chain_id, evm_nonce.field(), gas, stata_token.field().private(), calldata);
 
         let path = common::SigningPath::vault_path(c).private();

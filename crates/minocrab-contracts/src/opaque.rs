@@ -193,7 +193,7 @@ impl OpaqueLedger {
     pub fn op_set(c: &mut Circuit3, k: OpaqueStr) -> Discloses<Key, Bool<Public>> {
         let k = k.disclose_as::<Key>(c);
         OPAQUE.names.insert(c, &k);
-        Discloses::of(OPAQUE.names.member(c, &k))
+        Discloses::of(*OPAQUE.names.member(c, &k))
     }
 
     /// `export circuit opMaybe(x: Opaque<"string">): []

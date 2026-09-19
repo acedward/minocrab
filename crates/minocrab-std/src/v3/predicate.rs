@@ -490,7 +490,8 @@ fn check_literal_fits(literal: Option<Fr>, bits: u32) {
 /// [`not`], and the [`Circuit3::when`](minocrab::v3::Circuit3::when) scope —
 /// before this, those sites had to drop out of the predicate vocabulary into
 /// `c.assert_with(cond, Some(msg))`.
-pub fn is_true<V: Vis3>(b: Bool<V>) -> Check<V> {
+pub fn is_true<V: Vis3>(b: impl Into<Bool<V>>) -> Check<V> {
+    let b: Bool<V> = b.into();
     Check {
         node: Node::Leaf(b.field()),
         message: None,
@@ -555,6 +556,13 @@ impl<V: Vis3> Assertion for Check<V> {
 impl<V: Vis3> Assertion for Bool<V> {
     fn assert_in(self, c: &mut Circuit3) {
         c.assert_with(self.field(), None);
+    }
+}
+
+/// An assumed boolean asserts as the boolean does.
+impl<V: Vis3> Assertion for crate::v3::Assumed<Bool<V>> {
+    fn assert_in(self, c: &mut Circuit3) {
+        Bool::from(self).assert_in(c)
     }
 }
 

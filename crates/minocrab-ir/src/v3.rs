@@ -24,7 +24,7 @@ pub mod taint;
 
 #[cfg(feature = "unstable")]
 /// A handle to one named, typed circuit value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Val(u32);
 
 #[cfg(feature = "unstable")]
@@ -267,6 +267,72 @@ impl Builder3 {
                 } if *output == name => Some(*imm),
                 _ => None,
             })
+    }
+
+    /// Whether `val` is the output of a PUBLIC transcript read — a ledger
+    /// read's witnessed value.
+    pub fn is_public_input(&self, val: Val) -> bool {
+        let name = self.name(val);
+        self.instructions.iter().any(|instruction| {
+            matches!(instruction, Instruction::PublicInput { output, .. } if *output == name)
+        })
+    }
+
+    /// The index of the instruction that binds `val`, if one does (a circuit
+    /// argument has none).
+    pub fn instruction_index_of(&self, val: Val) -> Option<usize> {
+        let name = self.name(val);
+        self.instructions
+            .iter()
+            .position(|instruction| passes::defined_identifiers(instruction).contains(&name))
+    }
+
+    /// The public transcript reads `val` DESCENDS FROM: every `public_input`
+    /// output reachable backwards through the operands of the instructions
+    /// that built it, not looking behind any value for which `stop` holds.
+    /// Dataflow provenance, the question the stale-read backstop asks
+    /// (notes/hooks-design.org): the types track direct read results, this
+    /// tracks what was computed from them.
+    pub fn transcript_reads_behind(&self, val: Val, stop: &dyn Fn(Val) -> bool) -> Vec<Val> {
+        use std::collections::{HashMap, HashSet};
+        let val_of: HashMap<&Identifier, Val> = self
+            .names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name, Val(i as u32)))
+            .collect();
+        let mut defs: HashMap<&Identifier, usize> = HashMap::new();
+        for (i, instruction) in self.instructions.iter().enumerate() {
+            for name in passes::defined_identifiers(instruction) {
+                if let Some((key, _)) = val_of.get_key_value(&name) {
+                    defs.insert(key, i);
+                }
+            }
+        }
+        let mut reads = Vec::new();
+        let mut seen: HashSet<Val> = HashSet::new();
+        let mut stack = vec![val];
+        while let Some(v) = stack.pop() {
+            if !seen.insert(v) || stop(v) {
+                continue;
+            }
+            let Some(&i) = defs.get(&self.names[v.0 as usize]) else {
+                continue; // a circuit argument
+            };
+            let instruction = &self.instructions[i];
+            if matches!(instruction, Instruction::PublicInput { .. }) {
+                reads.push(v);
+                continue;
+            }
+            for operand in passes::operands(instruction) {
+                if let Operand::Variable(id) = operand {
+                    if let Some(&w) = val_of.get(&id) {
+                        stack.push(w);
+                    }
+                }
+            }
+        }
+        reads
     }
 
     /// Whether `val` is the output of a transcript read (`private_input` /

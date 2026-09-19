@@ -124,7 +124,7 @@ impl NestedTyped {
     ) -> Discloses<(Key, Key2), Uint<64, Public>> {
         let k = k.disclose_as::<Key>(c);
         let k2 = k2.disclose_as::<Key2>(c);
-        Discloses::of(NESTED.mm.at_key(c, &k).lookup(c, &k2))
+        Discloses::of(*NESTED.mm.at_key(c, &k).lookup(c, &k2))
     }
 
     #[circuit(output = "member")]
@@ -135,7 +135,7 @@ impl NestedTyped {
     ) -> Discloses<(Key, Key2), Bool<Public>> {
         let k = k.disclose_as::<Key>(c);
         let k2 = k2.disclose_as::<Key2>(c);
-        Discloses::of(NESTED.mm.at_key(c, &k).member(c, &k2))
+        Discloses::of(*NESTED.mm.at_key(c, &k).member(c, &k2))
     }
 
     #[circuit]
@@ -153,13 +153,13 @@ impl NestedTyped {
     #[circuit(output = "size")]
     pub fn map_size(c: &mut Circuit3, k: B32<Private>) -> Discloses<(Key,), Uint<64, Public>> {
         let k = k.disclose_as::<Key>(c);
-        Discloses::of(NESTED.mm.at_key(c, &k).size(c))
+        Discloses::of(*NESTED.mm.at_key(c, &k).size(c))
     }
 
     #[circuit(output = "empty")]
     pub fn map_is_empty(c: &mut Circuit3, k: B32<Private>) -> Discloses<(Key,), Bool<Public>> {
         let k = k.disclose_as::<Key>(c);
-        Discloses::of(NESTED.mm.at_key(c, &k).is_empty(c))
+        Discloses::of(*NESTED.mm.at_key(c, &k).is_empty(c))
     }
 
     #[circuit]
@@ -203,7 +203,7 @@ impl NestedTyped {
     #[circuit(output = "length")]
     pub fn list_length(c: &mut Circuit3, k: B32<Private>) -> Discloses<(Key,), Uint<64, Public>> {
         let k = k.disclose_as::<Key>(c);
-        Discloses::of(NESTED.ml.at_key(c, &k).length(c))
+        Discloses::of(*NESTED.ml.at_key(c, &k).length(c))
     }
 
     #[circuit(output = "head")]
@@ -212,13 +212,13 @@ impl NestedTyped {
         k: B32<Private>,
     ) -> Discloses<(Key,), Maybe<B32<Public>, Public>> {
         let k = k.disclose_as::<Key>(c);
-        Discloses::of(NESTED.ml.at_key(c, &k).head(c))
+        Discloses::of(*NESTED.ml.at_key(c, &k).head(c))
     }
 
     #[circuit(output = "empty")]
     pub fn list_is_empty(c: &mut Circuit3, k: B32<Private>) -> Discloses<(Key,), Bool<Public>> {
         let k = k.disclose_as::<Key>(c);
-        Discloses::of(NESTED.ml.at_key(c, &k).is_empty(c))
+        Discloses::of(*NESTED.ml.at_key(c, &k).is_empty(c))
     }
 
     #[circuit]
@@ -262,7 +262,7 @@ impl NestedTyped {
     ) -> Discloses<(Key, Elem), Bool<Public>> {
         let k = k.disclose_as::<Key>(c);
         let e = e.disclose_as::<Elem>(c);
-        Discloses::of(NESTED.ms.at_key(c, &k).member(c, &e))
+        Discloses::of(*NESTED.ms.at_key(c, &k).member(c, &e))
     }
 
     #[circuit]
@@ -284,7 +284,7 @@ impl NestedTyped {
     #[circuit(output = "count")]
     pub fn counter_read(c: &mut Circuit3, k: B32<Private>) -> Discloses<(Key,), Uint<64, Public>> {
         let k = k.disclose_as::<Key>(c);
-        Discloses::of(NESTED.mc.at_key(c, &k).read(c))
+        Discloses::of(*NESTED.mc.at_key(c, &k).read(c))
     }
 
     #[circuit]
@@ -316,7 +316,7 @@ impl NestedTyped {
     ) -> Discloses<(Key, Root), Bool<Public>> {
         let k = k.disclose_as::<Key>(c);
         let rt = rt.disclose_as::<Root>(c);
-        Discloses::of(NESTED.mt.at_key(c, &k).check_root(c, rt))
+        Discloses::of(*NESTED.mt.at_key(c, &k).check_root(c, rt))
     }
 
     #[circuit]
@@ -380,7 +380,7 @@ impl NestedTyped {
         let k = k.disclose_as::<Key>(c);
         let k2 = k2.disclose_as::<Key2>(c);
         let k3 = k3.disclose_as::<Key3>(c);
-        Discloses::of(NESTED.mmm.at_key(c, &k).at_key(c, &k2).lookup(c, &k3))
+        Discloses::of(*NESTED.mmm.at_key(c, &k).at_key(c, &k2).lookup(c, &k3))
     }
 }
 

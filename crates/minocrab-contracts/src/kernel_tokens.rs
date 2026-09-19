@@ -164,7 +164,7 @@ impl KernelTokens {
     pub fn k_balance(c: &mut Circuit3, color: CoinColor<Private>) -> Discloses<(Color,), Uint<128, Public>> {
         let color = color.disclose_as::<Color>(c);
         let token = kernel::unshielded(c, color);
-        Discloses::of(kernel::balance(c, &token))
+        Discloses::of(*kernel::balance(c, &token))
     }
 
     /// `export circuit kBalanceLessThan(color, amount): Boolean`
@@ -177,7 +177,7 @@ impl KernelTokens {
         let color = color.disclose_as::<Color>(c);
         let amount = amount.disclose_as::<Amount>(c);
         let token = kernel::unshielded(c, color);
-        Discloses::of(kernel::balance_less_than(c, &token, amount))
+        Discloses::of(*kernel::balance_less_than(c, &token, amount))
     }
 
     /// `export circuit kBalanceGreaterThan(color, amount): Boolean`
@@ -190,7 +190,7 @@ impl KernelTokens {
         let color = color.disclose_as::<Color>(c);
         let amount = amount.disclose_as::<Amount>(c);
         let token = kernel::unshielded(c, color);
-        Discloses::of(kernel::balance_greater_than(c, &token, amount))
+        Discloses::of(*kernel::balance_greater_than(c, &token, amount))
     }
 
     /// `export circuit kBlockTimeLessThan(t: Uint<64>): Boolean`
@@ -200,7 +200,7 @@ impl KernelTokens {
         t: Uint<64>,
     ) -> Discloses<(Time,), Bool<Public>> {
         let t = t.disclose_as::<Time>(c);
-        Discloses::of(kernel::block_time_less_than(c, t))
+        Discloses::of(*kernel::block_time_less_than(c, t))
     }
 
     /// `export circuit kBlockTimeGreaterThan(t: Uint<64>): Boolean`
@@ -210,7 +210,7 @@ impl KernelTokens {
         t: Uint<64>,
     ) -> Discloses<(Time,), Bool<Public>> {
         let t = t.disclose_as::<Time>(c);
-        Discloses::of(kernel::block_time_greater_than(c, t))
+        Discloses::of(*kernel::block_time_greater_than(c, t))
     }
 
     // ---- the stdlib circuits ----------------------------------------------------
@@ -219,28 +219,28 @@ impl KernelTokens {
     #[circuit(output = "lt")]
     pub fn s_block_time_lt(c: &mut Circuit3, t: Uint<64>) -> Discloses<(Time,), Bool<Public>> {
         let t = t.disclose_as::<Time>(c);
-        Discloses::of(kernel::block_time_lt(c, t))
+        Discloses::of(*kernel::block_time_lt(c, t))
     }
 
     /// `export circuit sBlockTimeGte(t): Boolean { return blockTimeGte(t); }`
     #[circuit(output = "gte")]
     pub fn s_block_time_gte(c: &mut Circuit3, t: Uint<64>) -> Discloses<(Time,), Bool<Public>> {
         let t = t.disclose_as::<Time>(c);
-        Discloses::of(kernel::block_time_gte(c, t))
+        Discloses::of(*kernel::block_time_gte(c, t))
     }
 
     /// `export circuit sBlockTimeGt(t): Boolean { return blockTimeGt(t); }`
     #[circuit(output = "gt")]
     pub fn s_block_time_gt(c: &mut Circuit3, t: Uint<64>) -> Discloses<(Time,), Bool<Public>> {
         let t = t.disclose_as::<Time>(c);
-        Discloses::of(kernel::block_time_gt(c, t))
+        Discloses::of(*kernel::block_time_gt(c, t))
     }
 
     /// `export circuit sBlockTimeLte(t): Boolean { return blockTimeLte(t); }`
     #[circuit(output = "lte")]
     pub fn s_block_time_lte(c: &mut Circuit3, t: Uint<64>) -> Discloses<(Time,), Bool<Public>> {
         let t = t.disclose_as::<Time>(c);
-        Discloses::of(kernel::block_time_lte(c, t))
+        Discloses::of(*kernel::block_time_lte(c, t))
     }
 
     /// `export circuit sUnshieldedBalance(color): Uint<128>`
@@ -250,7 +250,7 @@ impl KernelTokens {
         color: CoinColor<Private>,
     ) -> Discloses<(Color,), Uint<128, Public>> {
         let color = color.disclose_as::<Color>(c);
-        Discloses::of(kernel::unshielded_balance(c, color))
+        Discloses::of(*kernel::unshielded_balance(c, color))
     }
 
     /// `export circuit sUnshieldedBalanceLt(color, a): Boolean`
@@ -262,7 +262,7 @@ impl KernelTokens {
     ) -> Discloses<(Color, Amount), Bool<Public>> {
         let color = color.disclose_as::<Color>(c);
         let a = a.disclose_as::<Amount>(c);
-        Discloses::of(kernel::unshielded_balance_lt(c, color, a))
+        Discloses::of(*kernel::unshielded_balance_lt(c, color, a))
     }
 
     /// `export circuit sUnshieldedBalanceGte(color, a): Boolean`
@@ -274,7 +274,7 @@ impl KernelTokens {
     ) -> Discloses<(Color, Amount), Bool<Public>> {
         let color = color.disclose_as::<Color>(c);
         let a = a.disclose_as::<Amount>(c);
-        Discloses::of(kernel::unshielded_balance_gte(c, color, a))
+        Discloses::of(*kernel::unshielded_balance_gte(c, color, a))
     }
 
     /// `export circuit sUnshieldedBalanceGt(color, a): Boolean`
@@ -286,7 +286,7 @@ impl KernelTokens {
     ) -> Discloses<(Color, Amount), Bool<Public>> {
         let color = color.disclose_as::<Color>(c);
         let a = a.disclose_as::<Amount>(c);
-        Discloses::of(kernel::unshielded_balance_gt(c, color, a))
+        Discloses::of(*kernel::unshielded_balance_gt(c, color, a))
     }
 
     /// `export circuit sUnshieldedBalanceLte(color, a): Boolean`
@@ -298,7 +298,7 @@ impl KernelTokens {
     ) -> Discloses<(Color, Amount), Bool<Public>> {
         let color = color.disclose_as::<Color>(c);
         let a = a.disclose_as::<Amount>(c);
-        Discloses::of(kernel::unshielded_balance_lte(c, color, a))
+        Discloses::of(*kernel::unshielded_balance_lte(c, color, a))
     }
 
     /// `export circuit sReceiveUnshielded(color, a): []`

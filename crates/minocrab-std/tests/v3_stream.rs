@@ -252,7 +252,8 @@ fn a_primitive_stream_inserts_blind_and_takes_the_post_step_state() {
     // Take: the body and the pair, and everything read is removed.
     let take = compile(|c| {
         let (k, expect_nonce) = two_args(c);
-        let (body, (nonce, seen)) = BLOCK.outbox.take(c, &k);
+        let (body, state) = BLOCK.outbox.take(c, &k);
+        let (nonce, seen) = *state;
         c.assert(eq(nonce, expect_nonce));
         c.assert(eq(body, 120u64));
         c.assert(eq(seen, 120u64));

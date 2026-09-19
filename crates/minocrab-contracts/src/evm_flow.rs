@@ -506,9 +506,10 @@ use minocrab_std::v3::borsh::CircuitBorsh;
 use minocrab_std::v3::hash::{transient_hash_compact, upgrade_from_transient};
 use minocrab_std::v3::{
     eq, is_true, label, not, own_public_key, repr_limbs, ArgPath, Bytes, CircuitAbi, CircuitArg,
-    Disclose, DisclosureLabel, FieldPath, LedgerMap, LedgerRepr, LedgerWidth, Prim,
-    Uint, Vis3, ZswapCoinPublicKey, B32,
+    Assumed, Disclose, DisclosureLabel, FieldPath, LedgerMap, LedgerRepr, LedgerWidth, Prim,
+    ProofWires, Uint, Vis3, ZswapCoinPublicKey, B32,
 };
+use minocrab::v3::Val;
 use signet_signer_interface::{RequestId, Signature};
 
 use crate::common::{self, SecretKey, SigningPath};
@@ -882,6 +883,12 @@ impl<T: CircuitArg, Tag: CommitTag> Commit<T, Tag> {
     }
 }
 
+impl<T, Tag> ProofWires for Commit<T, Tag> {
+    fn push_wires(&self, out: &mut Vec<Val>) {
+        self.digest.push_wires(out)
+    }
+}
+
 impl<T, Tag> LedgerRepr for Commit<T, Tag> {
     fn atoms() -> Vec<minocrab::AlignmentAtom> {
         <B32<Public> as LedgerRepr>::atoms()
@@ -914,6 +921,13 @@ pub struct Owned<E> {
     pub owner: Commit<SecretKey<Private>, OwnerTag>,
     /// Whatever else the settle side needs.
     pub inner: E,
+}
+
+impl<E: ProofWires> ProofWires for Owned<E> {
+    fn push_wires(&self, out: &mut Vec<Val>) {
+        self.owner.push_wires(out);
+        self.inner.push_wires(out);
+    }
 }
 
 impl<E: LedgerRepr> LedgerRepr for Owned<E> {
@@ -1379,7 +1393,7 @@ where
         &self,
         c: &mut Circuit3,
         request_id: RequestId<Public>,
-    ) -> (EventRecordV2<WORDS>, Env) {
+    ) -> (Assumed<EventRecordV2<WORDS>>, Assumed<Env>) {
         c.region("signet flow: consume", |c| {
             let found = self.records.member(c, &request_id);
             c.assert(is_true(found).message("Request not found"));
@@ -1434,7 +1448,7 @@ where
         &self,
         c: &mut Circuit3,
         ticket: Failed<F>,
-    ) -> (ZswapCoinPublicKey<Public>, E, Ret<Called<F>>) {
+    ) -> (ZswapCoinPublicKey<Public>, Assumed<E>, Ret<Called<F>>) {
         let outcome = self.refund(c, ticket);
         let sk = common::witness_sk(c);
         outcome
@@ -1442,7 +1456,7 @@ where
             .owner
             .open(c, &sk, outcome.request_id, "Not the owner");
         let owner = own_public_key(c).disclose_as::<L>(c);
-        (owner, outcome.env.inner, outcome.output)
+        (owner, outcome.env.map(|e| e.inner), outcome.output)
     }
 }
 
@@ -1491,6 +1505,12 @@ impl<V: Vis3> Handle<V> {
     /// that does.
     pub fn from_field_unchecked(w: Wire3<FieldT, V>) -> Self {
         Handle(w)
+    }
+}
+
+impl ProofWires for Handle<Public> {
+    fn push_wires(&self, out: &mut Vec<Val>) {
+        out.push(self.0.val());
     }
 }
 
@@ -1594,6 +1614,12 @@ impl<const WORDS: usize> PreRecord<WORDS> {
     }
 }
 
+impl<const WORDS: usize> ProofWires for PreRecord<WORDS> {
+    fn push_wires(&self, out: &mut Vec<Val>) {
+        out.extend(self.0.iter().map(|w| w.val()));
+    }
+}
+
 impl<const WORDS: usize> LedgerRepr for PreRecord<WORDS> {
     fn atoms() -> Vec<minocrab::AlignmentAtom> {
         let mut atoms = <Bytes<20, Public> as LedgerRepr>::atoms();
@@ -1631,6 +1657,13 @@ pub struct QueueEntry<Env, const WORDS: usize> {
     /// What the settle side will need, moved verbatim into the `Pending`
     /// environment map under the request id at flush.
     pub env: Env,
+}
+
+impl<Env: ProofWires, const WORDS: usize> ProofWires for QueueEntry<Env, WORDS> {
+    fn push_wires(&self, out: &mut Vec<Val>) {
+        self.pre.push_wires(out);
+        self.env.push_wires(out);
+    }
 }
 
 impl<Env: LedgerRepr, const WORDS: usize> LedgerRepr for QueueEntry<Env, WORDS> {
@@ -1671,6 +1704,14 @@ pub struct HandleOwned<E> {
     pub owner: Commit<SecretKey<Private>, OwnerTag>,
     /// Whatever else the settle side needs.
     pub inner: E,
+}
+
+impl<E: ProofWires> ProofWires for HandleOwned<E> {
+    fn push_wires(&self, out: &mut Vec<Val>) {
+        self.handle.push_wires(out);
+        self.owner.push_wires(out);
+        self.inner.push_wires(out);
+    }
 }
 
 impl<E: LedgerRepr> LedgerRepr for HandleOwned<E> {

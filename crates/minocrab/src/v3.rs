@@ -12,8 +12,8 @@
 
 use std::marker::PhantomData;
 
-use minocrab_ir::v3::{Arg, Builder3, IrSource, IrType, Val};
-pub use minocrab_ir::v3::{Alignment, Identifier};
+use minocrab_ir::v3::{Arg, Builder3, IrSource, IrType};
+pub use minocrab_ir::v3::{Alignment, Identifier, Val};
 use minocrab_ir::Fr;
 
 use crate::{DisclosureKind, Meet, OnChainGuard, Private, Public, Region, Visibility};
@@ -875,6 +875,44 @@ pub struct Circuit3 {
     private_scopes: u32,
     /// Gadget scratch state — see [`Circuit3::ext_insert`].
     ext: std::collections::BTreeMap<std::any::TypeId, Box<dyn std::any::Any>>,
+    /// The DEFERRED Impact programs — see [`Circuit3::then`]. Each was
+    /// lowered at attachment and is emitted, in this order, when the body
+    /// ends, under the guard captured at attachment.
+    deferred: Vec<DeferredImpact>,
+    /// Transcript reads the programmer has NAMED AS STALE-ABLE
+    /// (`Assumed::stale`, notes/hooks-design.org): a value descending from
+    /// one of these may re-enter the ledger; one descending from any other
+    /// read is refused at the ledger boundary — see
+    /// [`Circuit3::refuse_stale`].
+    acknowledged_reads: std::collections::HashSet<Val>,
+    /// What each transcript read was, in the ledger layer's words (`cell
+    /// read at field 3`), for the refusal to name it.
+    read_labels: std::collections::BTreeMap<Val, String>,
+}
+
+/// One attached [`Deferred`] program: its instructions and the ambient
+/// guard at attachment (`None` for straight-line code).
+pub(crate) struct DeferredImpact {
+    pub(crate) guard: Option<Val>,
+    pub(crate) ops: Vec<Vec<ImpactElem>>,
+}
+
+/// A program the circuit EMITS AFTER ITS BODY — the ledger hook of
+/// notes/hooks-design.org, at the level this crate sees it: a list of Impact
+/// instructions, lowered once at attachment.
+///
+/// [`Circuit3::then`] lowers the value on the spot (so its wires are the
+/// values they are at the `then`), records the ambient guard, and holds
+/// the instructions until the body has emitted everything else; then every
+/// attached program is emitted in attachment order, each under its own
+/// captured guard. The transcript therefore runs the body's inline effects
+/// first — including writes that appear textually after the `then` — and
+/// the hooks after them, which is the order the design states and the
+/// order a reader of the circuit should assume.
+pub trait Deferred {
+    /// The instructions, one `Vec<ImpactElem>` per Impact op, with every
+    /// circuit-computed element a [`Public`] wire.
+    fn lower(self, c: &mut Circuit3) -> Vec<Vec<ImpactElem>>;
 }
 
 /// A finished v3 circuit: the lowered ZKIR plus its disclosure record.
@@ -915,6 +953,71 @@ impl Circuit3 {
             guards: Vec::new(),
             private_scopes: 0,
             ext: std::collections::BTreeMap::new(),
+            deferred: Vec::new(),
+            acknowledged_reads: std::collections::HashSet::new(),
+            read_labels: std::collections::BTreeMap::new(),
+        }
+    }
+
+    // --- the stale-read backstop --------------------------------------------------
+
+    /// Name a transcript read's wires, so a refusal can say which read a
+    /// value descends from. The ledger layer calls this after minting.
+    pub fn label_reads(&mut self, wires: &[Wire3<FieldT, Public>], label: &str) {
+        let vals: Vec<Val> = wires.iter().map(|w| w.val).collect();
+        self.label_read_vals(&vals, label);
+    }
+
+    /// [`Circuit3::label_reads`] on raw values — for a typed gate (a point
+    /// cell's read) that is not a `FieldT` wire.
+    pub fn label_read_vals(&mut self, vals: &[Val], label: &str) {
+        for &v in vals {
+            self.read_labels.insert(v, label.to_string());
+        }
+    }
+
+    /// Mark every transcript read behind `wires` as ACKNOWLEDGED: the
+    /// programmer has said, by writing `.stale()`, that the transaction
+    /// assumes those values are still current at landing. Values derived
+    /// from them may then re-enter the ledger.
+    pub fn acknowledge_stale(&mut self, wires: &[Val]) {
+        for &w in wires {
+            let reads = self.b.transcript_reads_behind(w, &|_| false);
+            self.acknowledged_reads.extend(reads);
+        }
+    }
+
+    /// The BACKSTOP at the ledger boundary (notes/hooks-design.org, "Stale
+    /// values must be named"): refuse a value that descends from a
+    /// transcript read the programmer has not acknowledged with `.stale()`,
+    /// naming the read. The types catch a read result used directly (an
+    /// `Assumed<T>` has no ledger representation); this catches what was
+    /// COMPUTED from one, which Rust's types do not carry. A build-time
+    /// error, the last rung of the rejection ladder, recorded for review.
+    #[track_caller]
+    pub fn refuse_stale(&self, wires: &[Val], what: &str) {
+        for &w in wires {
+            let acknowledged = &self.acknowledged_reads;
+            let reads = self.b.transcript_reads_behind(w, &|v| acknowledged.contains(&v));
+            if let Some(read) = reads.first() {
+                let label = self
+                    .read_labels
+                    .get(read)
+                    .cloned()
+                    .unwrap_or_else(|| "a transcript read".to_string());
+                let at = self
+                    .b
+                    .instruction_index_of(*read)
+                    .map(|i| format!(" (instruction {i})"))
+                    .unwrap_or_default();
+                panic!(
+                    "{what} descends from {label}{at}, an inline ledger read the transaction \
+                     ASSUMES is still current at landing, and nothing names that assumption. \
+                     Write `.stale(c)` on the value you read (`let x = SLOT.read(c).stale(c);`) \
+                     to record it — or, if the write must not go stale, move it into a hook \
+                     (`c.then(Hook::new()…)`) that computes it on the ledger instead."
+                );
+            }
         }
     }
 
@@ -1570,7 +1673,16 @@ impl Circuit3 {
         guard: impl Into<Operand<FieldT, V>>,
         elems: &[ImpactElem],
     ) {
-        let args: Vec<Arg> = elems
+        let args = self.impact_args(elems);
+        let guard = self.effect_guard(Some(guard.into().arg()));
+        self.emit_impact(guard, &args);
+    }
+
+    /// The operands of one Impact instruction, recording each wire among
+    /// them as a disclosure — shared by the inline and the deferred
+    /// emitters so both keep the same record.
+    pub(crate) fn impact_args(&mut self, elems: &[ImpactElem]) -> Vec<Arg> {
+        elems
             .iter()
             .map(|e| match e {
                 ImpactElem::Imm(imm) => Arg::Imm(*imm),
@@ -1584,9 +1696,36 @@ impl Circuit3 {
                     Arg::Val(w.val)
                 }
             })
+            .collect()
+    }
+
+    /// ATTACH a deferred program (a ledger hook): lower it now, capture the
+    /// ambient guard, and emit it after the body — see [`Deferred`].
+    ///
+    /// Inside [`Circuit3::when`] the hook is emitted under that scope's
+    /// guard, so it is absent from the transcript where the guard is off.
+    /// Inside [`Circuit3::when_private`] it is refused at build time, as
+    /// every on-chain effect there is: emitting it later would disclose
+    /// the private condition just the same.
+    #[track_caller]
+    pub fn then<D: Deferred>(&mut self, program: D) {
+        let ops = program.lower(self);
+        let wires: Vec<Val> = ops
+            .iter()
+            .flat_map(|op| op.iter())
+            .filter_map(|e| match e {
+                ImpactElem::Wire(w) => Some(w.val),
+                ImpactElem::Imm(_) => None,
+            })
             .collect();
-        let guard = self.effect_guard(Some(guard.into().arg()));
-        self.emit_impact(guard, &args);
+        self.refuse_stale(&wires, "a hook argument");
+        self.defer_impact(ops);
+    }
+
+    /// How many attached programs are waiting to be emitted. Zero after
+    /// [`Circuit3::flush_deferred`] / [`Circuit3::finish`].
+    pub fn deferred_count(&self) -> usize {
+        self.deferred.len()
     }
 
     /// Queue a wire as a circuit output (the single v3 Output terminator is
@@ -1876,6 +2015,7 @@ impl Circuit3 {
     // --- finish ------------------------------------------------------------------------------
 
     pub fn finish(mut self, communications_commitment: bool) -> Compiled3 {
+        self.flush_deferred();
         if !self.queued_outputs.is_empty() {
             let vals: Vec<Arg> = self
                 .queued_outputs

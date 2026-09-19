@@ -25,7 +25,7 @@
 
 use minocrab::v3::Circuit3;
 use minocrab::Public;
-use minocrab_std::v3::{contract, label, BoundedUint, Disclose, Discloses, Ledger, LedgerCell};
+use minocrab_std::v3::{Assumed, contract, label, BoundedUint, Disclose, Discloses, Ledger, LedgerCell};
 
 label! {
     /// The one value this fixture ever discloses.
@@ -57,7 +57,7 @@ impl BoundedLedger {
     /// check a write-only fixture would miss: the read side carries the
     /// same alignment byte in its own Impact op.
     #[circuit(output = "cell")]
-    pub fn bl_read(c: &mut Circuit3) -> BoundedUint<1, Public> {
+    pub fn bl_read(c: &mut Circuit3) -> Assumed<BoundedUint<1, Public>> {
         BOUNDED_LEDGER.cell.read(c)
     }
 }

@@ -20,7 +20,7 @@ use minocrab::{AlignmentAtom, Public};
 use minocrab_std::v3::borsh::CircuitBorsh;
 use minocrab_std::v3::hash::upgrade_from_transient;
 use minocrab_std::v3::{
-    pow2_const, secp256k1_ecdsa_verify, BytesN, ContractAddress, LedgerRepr,
+    pow2_const, secp256k1_ecdsa_verify, BytesN, ContractAddress, LedgerRepr, ProofWires,
     Secp256k1EcdsaSignature, Serializer, Vis3, B32,
 };
 
@@ -484,6 +484,12 @@ impl<const WORDS: usize> EventRecordV2<WORDS> {
             hi: self.0[layout_v2::word_hi(i)],
             lo: self.0[layout_v2::word_lo(i)],
         }
+    }
+}
+
+impl<const WORDS: usize> ProofWires for EventRecordV2<WORDS> {
+    fn push_wires(&self, out: &mut Vec<minocrab::v3::Val>) {
+        out.extend(self.0.iter().map(|w| w.val()));
     }
 }
 

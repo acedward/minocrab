@@ -170,16 +170,21 @@ fn flush(c: &mut Circuit3, keys: NonEmpty<Uint<64>, 3>) -> Discloses<(FlushKeys,
 }
 ```
 
-**Blind ledger update** — a ledger op that fetches a cell and stores or combines it *without* a `popeq` embeds no public input, so nothing a landed transaction changes can make it stale: `snapshot_into` copies a cell into a map entry the circuit never reads, `combine_blind` applies `Add`, `Max`, `Min`, `And`, `Or`, `Last` or `First` against a public delta, and a tuple state (`(Add, Max)` over `(nonce, last_seen)`) is one cell and one snapshot map per component. That is the accumulator behind a contention-free outbox (M41). Compact compiles every ledger read to a `popeq` except `Counter.increment`; it has no construct that moves a ledger value to another slot without reading it into the circuit (`m.insert(k, cell)` reads `cell` first) and no ledger-side compare-and-select (`Counter.lessThan` is a read). Gated on Midnight's on-chain VM, not on a compactc artifact ([v3_blind.rs](crates/minocrab-std/tests/v3_blind.rs)); five to twelve Impact ops, zero read rows.
+**Blind ledger update** — inline is the read set, the hook is the write program. Every inline ledger read is a `popeq`: an assumption the landing validates, which a landed transaction can make stale. A `Hook` is a program the ledger runs *after* the body on whatever it holds then — `add` / `sub` / `max` / `min` / `and` / `or` on a cell, `copy` of a cell into a map entry the circuit never reads, `move_entry`, `if_absent` / `if_below` / `if_unset` branches — and it embeds no public input, so nothing can stale it and it cannot tell the circuit anything. Attached with `c.then(hook)`, emitted in attachment order under the guard of the `when` it was attached in. The accumulator behind a contention-free outbox (M41) is one: `(Add, Max)` over `(nonce, last_seen)`, one cell and one snapshot map per component. And the read side is typed: every inline read returns `Assumed<T>`, which the proof uses as `T` and the ledger refuses to store until `.stale(c)` names the assumption — so a read-modify-write says so where it happens, and a value *computed* from a read is caught at the ledger boundary at build time, naming the read. Compact compiles every ledger read to a `popeq` except `Counter.increment`; it has no construct that moves a ledger value to another slot without reading it into the circuit (`m.insert(k, cell)` reads `cell` first) and no ledger-side compare-and-select (`Counter.lessThan` is a read). Gated on Midnight's on-chain VM, not on a compactc artifact ([v3_hook.rs](crates/minocrab-std/tests/v3_hook.rs), [v3_blind.rs](crates/minocrab-std/tests/v3_blind.rs)); four to twelve Impact ops per method, zero read rows.
 
 ```compact
 // no equivalent: nonces.insert(k, nonce) reads `nonce` (a popeq) before it inserts,
 // so two calls proven against one state cannot both land
 ```
 ```rust
-NONCE.combine_blind(c, Add, &one);           // idxp; push 1; add; insc — no popeq
-NONCE.snapshot_into(c, &SNAPSHOT, &k);       // idxp; push k; dup 3; idx; ins 1; insc — no popeq
-SEEN.combine_blind(c, Max, &att.height);     // the kernel-mint compare-and-select, ledger side
+c.then(Hook::new()
+    .add(&NONCE, 1u64)                 // idxp; push 1; add; insc — no popeq
+    .copy(&NONCE, &SNAPSHOT, k)        // idxp; push k; dup 3; idx; ins 1; insc — no popeq
+    .max(&SEEN, height));              // the kernel-mint compare-and-select, ledger side
+
+let seen = SEEN_AT.lookup(c, &k);      // Assumed<Uint<64, Public>>: the proof may compare it,
+c.assert(height.gt(seen));             // the ledger will not store it —
+OTHER.write(c, &seen);                 // error: write `.stale(c)` to name the assumption
 ```
 
 **Assert** — the comparison width comes from the operand's type, never typed at the call site.

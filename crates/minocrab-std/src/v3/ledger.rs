@@ -41,9 +41,9 @@ use minocrab::v3::{
     Secp256k1PointT, Wire3,
 };
 use minocrab::{Alignment, AlignmentAtom, AlignmentSegment, Fr, Public};
-use super::blind::Primitive;
+use super::assumed::{Assumed, ProofWires};
 use minocrab_ledger::{
-    atom_limbs, cell_read_embedded_at, cell_snapshot_into_map_at, cell_write_at, counter_increment_at, counter_less_than_at,
+    atom_limbs, cell_read_embedded_at, cell_write_at, counter_increment_at, counter_less_than_at,
     counter_read_at, counter_reset_at, emit, empty_counter, empty_historic_merkle_tree_value,
     empty_list, empty_map, empty_merkle_tree_value, historic_merkle_tree_check_root_at,
     historic_merkle_tree_insert_at, historic_merkle_tree_insert_index_at,
@@ -154,6 +154,15 @@ pub trait LedgerRepr: Sized {
 macro_rules! ledger_repr_via_abi {
     ($( $(#[$m:meta])* [$($gen:tt)*] $ty:ty ),* $(,)?) => {$(
         $(#[$m])*
+        impl<$($gen)*> ProofWires for $ty {
+            fn push_wires(&self, out: &mut Vec<minocrab::v3::Val>) {
+                let mut slots = Vec::new();
+                <$ty as CallArg>::push_call_slots(self, &mut slots);
+                out.extend(slots.iter().map(|w| w.val()));
+            }
+        }
+
+        $(#[$m])*
         impl<$($gen)*> LedgerRepr for $ty {
             fn atoms() -> Vec<AlignmentAtom> {
                 <$ty as CircuitAbi>::atoms()
@@ -226,6 +235,12 @@ ledger_repr_via_abi! {
 /// TYPED gate a read witnesses and encodes THAT (claim.zkir:29-33). Before
 /// this the field had to be a [`LedgerField`] with `cell_read_point` and a
 /// hand-written `cell_write` at the call sites.
+impl ProofWires for Secp256k1Point<Public> {
+    fn push_wires(&self, out: &mut Vec<minocrab::v3::Val>) {
+        out.push(self.point().val());
+    }
+}
+
 impl LedgerRepr for Secp256k1Point<Public> {
     fn atoms() -> Vec<AlignmentAtom> {
         <Secp256k1Point<Public> as CircuitAbi>::atoms()
@@ -252,6 +267,7 @@ impl LedgerRepr for Secp256k1Point<Public> {
 
     fn witness_read(c: &mut Circuit3) -> (Self, LedgerValue) {
         let point = c.public_transcript_input::<Secp256k1PointT>();
+        c.label_read_vals(&[point.val()], "a point cell read");
         let point = Secp256k1Point::from_point(point);
         let mut limbs = Vec::new();
         point.push_limbs(c, &mut limbs);
@@ -271,6 +287,12 @@ impl LedgerRepr for Secp256k1Point<Public> {
 /// TYPED gate and encodes that. A `LedgerMap<_, JubjubPoint>` is therefore not
 /// supported either — store it in a `Cell`, which is the only shape Compact's
 /// own `JubjubPoint` ledger fields take (`test-center/compact/test`'s `x15`).
+impl ProofWires for JubjubPoint<Public> {
+    fn push_wires(&self, out: &mut Vec<minocrab::v3::Val>) {
+        out.push(self.point().val());
+    }
+}
+
 impl LedgerRepr for JubjubPoint<Public> {
     fn atoms() -> Vec<AlignmentAtom> {
         <JubjubPoint<Public> as CircuitAbi>::atoms()
@@ -292,6 +314,7 @@ impl LedgerRepr for JubjubPoint<Public> {
 
     fn witness_read(c: &mut Circuit3) -> (Self, LedgerValue) {
         let point = c.public_transcript_input::<JubjubPointT>();
+        c.label_read_vals(&[point.val()], "a point cell read");
         let point = JubjubPoint::from_point(point);
         let mut limbs = Vec::new();
         point.push_limbs(c, &mut limbs);
@@ -619,6 +642,48 @@ const SEGMENT: usize = 15;
 
 /// How many wires a stored `T` reads back as — one per FAB limb of its
 /// atoms. `#[derive(LedgerRepr)]` splits a composite read with it.
+/// A value the ledger may STORE inline: every [`LedgerRepr`] value, and not
+/// an [`Assumed`] one. The bound on every inline write's value parameter,
+/// so a read result written straight back is a missing impl — the type's
+/// half of "stale values must be named" (notes/hooks-design.org); the
+/// backstop below is the other half, for values COMPUTED from a read.
+#[diagnostic::on_unimplemented(
+    message = "the ledger does not store `{Self}`: it is what an inline read returned, an assumption",
+    label = "write `.stale(c)` on it to name the assumption, or compute it on the ledger in a hook",
+    note = "an `Assumed<T>` is `T` to the proof and not to the ledger; `x.stale(c)` records that \
+            the transaction assumes the read value is still current at landing"
+)]
+pub trait Fresh<T> {
+    /// The value.
+    fn fresh(&self) -> &T;
+}
+
+impl<T: LedgerRepr> Fresh<T> for T {
+    fn fresh(&self) -> &T {
+        self
+    }
+}
+
+/// The value an inline WRITE stores, through the stale-read backstop
+/// (`Circuit3::refuse_stale`, notes/hooks-design.org): a value computed
+/// from an inline read that was not acknowledged with `.stale(c)` is
+/// refused here at build time, naming the read. Keys do not come through
+/// this; a key derived from a read adds no assumption the read's own
+/// `popeq` does not make.
+pub(crate) fn stored<T: LedgerRepr>(c: &mut Circuit3, value: &impl Fresh<T>, what: &str) -> LedgerValue {
+    let value = value.fresh().ledger_value(c);
+    let wires: Vec<minocrab::v3::Val> = value
+        .elems()
+        .iter()
+        .filter_map(|e| match e {
+            ImpactElem::Wire(w) => Some(w.val()),
+            ImpactElem::Imm(_) => None,
+        })
+        .collect();
+    c.refuse_stale(&wires, what);
+    value
+}
+
 pub fn repr_limbs<T: LedgerRepr>() -> usize {
     T::atoms().iter().map(atom_limbs).sum()
 }
@@ -1022,9 +1087,9 @@ impl<K: LedgerRepr, A: LedgerAdt, P: LedgerPath> LedgerMap<K, A, P> {
 /// exactly as a plain one does.
 impl<K: LedgerRepr, V, P: LedgerPath> LedgerMap<K, V, P> {
     /// `map.member(key)` — `dup 0; idx [field]; push key; member; popeqc`.
-    pub fn member(&self, c: &mut Circuit3, key: &K) -> Bool<Public> {
+    pub fn member(&self, c: &mut Circuit3, key: &K) -> Assumed<Bool<Public>> {
         let key = key.ledger_value(c);
-        Bool::from_field_unchecked(map_member_at(c, &self.ledger_path(), &key))
+        Assumed::of_read(Bool::from_field_unchecked(map_member_at(c, &self.ledger_path(), &key)))
     }
 
     /// `map.remove(key)` — `idxp [field]; push key; rem; insc 1`.
@@ -1043,16 +1108,16 @@ impl<K: LedgerRepr, V: LedgerRepr, P: LedgerPath> LedgerMap<K, V, P> {
     /// (midnight-ledger.ss:741-747). Only an INTERMEDIATE lookup —
     /// [`at_key`](LedgerMap::at_key), whose value type is an ADT — folds into
     /// the path and emits nothing at all.
-    pub fn lookup(&self, c: &mut Circuit3, key: &K) -> V {
+    pub fn lookup(&self, c: &mut Circuit3, key: &K) -> Assumed<V> {
         let key = key.ledger_value(c);
-        V::from_limbs(map_lookup_at(c, &self.ledger_path(), &key, V::atoms()))
+        Assumed::of_read(V::from_limbs(map_lookup_at(c, &self.ledger_path(), &key, V::atoms())))
     }
 
     /// `map.insert(key, value)` — `idxp [field]; push key; pushs value;
     /// ins 1; insc 1`.
-    pub fn insert(&self, c: &mut Circuit3, key: &K, value: &V) {
+    pub fn insert(&self, c: &mut Circuit3, key: &K, value: &impl Fresh<V>) {
         let key = key.ledger_value(c);
-        let value = value.ledger_value(c);
+        let value = stored(c, value, "a map insert's value");
         emit(c, &map_insert_at(&self.ledger_path(), &key, &value));
     }
 }
@@ -1112,13 +1177,13 @@ impl<K: LedgerRepr, V: CoinArm> LedgerMap<K, V> {
 /// The operations that touch neither the key nor the value type.
 impl<K, V, P: LedgerPath> LedgerMap<K, V, P> {
     /// `map.size()` — `dup 0; idx [field]; size; popeqc`.
-    pub fn size(&self, c: &mut Circuit3) -> Uint<64, Public> {
-        Uint::from_field_unchecked(map_size_at(c, &self.ledger_path()))
+    pub fn size(&self, c: &mut Circuit3) -> Assumed<Uint<64, Public>> {
+        Assumed::of_read(Uint::from_field_unchecked(map_size_at(c, &self.ledger_path())))
     }
 
     /// `map.isEmpty()` — `dup 0; idx [field]; size; push 0; eq; popeqc`.
-    pub fn is_empty(&self, c: &mut Circuit3) -> Bool<Public> {
-        Bool::from_field_unchecked(map_is_empty_at(c, &self.ledger_path()))
+    pub fn is_empty(&self, c: &mut Circuit3) -> Assumed<Bool<Public>> {
+        Assumed::of_read(Bool::from_field_unchecked(map_is_empty_at(c, &self.ledger_path())))
     }
 
     /// `map.resetToDefault()` — `push key; pushs (empty map); ins 1`. Needs
@@ -1212,9 +1277,9 @@ impl<T: LedgerRepr, P: LedgerPath> LedgerSet<T, P> {
     ///
     /// The same op a map's `member` is, which is why it delegates to
     /// `map_member` rather than to a `set_member` that would be its duplicate.
-    pub fn member(&self, c: &mut Circuit3, elem: &T) -> Bool<Public> {
+    pub fn member(&self, c: &mut Circuit3, elem: &T) -> Assumed<Bool<Public>> {
         let elem = elem.ledger_value(c);
-        Bool::from_field_unchecked(map_member_at(c, &self.ledger_path(), &elem))
+        Assumed::of_read(Bool::from_field_unchecked(map_member_at(c, &self.ledger_path(), &elem)))
     }
 
     /// `set.remove(elem)` — `idxp [field]; push elem; rem; insc 1`.
@@ -1250,13 +1315,13 @@ impl<T: CoinArm> LedgerSet<T> {
 
 impl<T, P: LedgerPath> LedgerSet<T, P> {
     /// `set.size()` — `dup 0; idx [field]; size; popeqc`.
-    pub fn size(&self, c: &mut Circuit3) -> Uint<64, Public> {
-        Uint::from_field_unchecked(set_size_at(c, &self.ledger_path()))
+    pub fn size(&self, c: &mut Circuit3) -> Assumed<Uint<64, Public>> {
+        Assumed::of_read(Uint::from_field_unchecked(set_size_at(c, &self.ledger_path())))
     }
 
     /// `set.isEmpty()` — `dup 0; idx [field]; size; push 0; eq; popeqc`.
-    pub fn is_empty(&self, c: &mut Circuit3) -> Bool<Public> {
-        Bool::from_field_unchecked(set_is_empty_at(c, &self.ledger_path()))
+    pub fn is_empty(&self, c: &mut Circuit3) -> Assumed<Bool<Public>> {
+        Assumed::of_read(Bool::from_field_unchecked(set_is_empty_at(c, &self.ledger_path())))
     }
 
     /// `set.resetToDefault()` — `push key; pushs (empty map); ins 1`.
@@ -1339,14 +1404,14 @@ impl<T, P: LedgerPath> LedgerList<T, P> {
 
     /// `list.length()` — `dup 0; idx [field]; idx [2]; popeqc`. A stored
     /// count, not a computed `size`.
-    pub fn length(&self, c: &mut Circuit3) -> Uint<64, Public> {
-        Uint::from_field_unchecked(list_length_at(c, &self.ledger_path()))
+    pub fn length(&self, c: &mut Circuit3) -> Assumed<Uint<64, Public>> {
+        Assumed::of_read(Uint::from_field_unchecked(list_length_at(c, &self.ledger_path())))
     }
 
     /// `list.isEmpty()` — `dup 0; idx [field]; idx [1]; type; push 1; eq;
     /// popeqc`, i.e. "the tail is null".
-    pub fn is_empty(&self, c: &mut Circuit3) -> Bool<Public> {
-        Bool::from_field_unchecked(list_is_empty_at(c, &self.ledger_path()))
+    pub fn is_empty(&self, c: &mut Circuit3) -> Assumed<Bool<Public>> {
+        Assumed::of_read(Bool::from_field_unchecked(list_is_empty_at(c, &self.ledger_path())))
     }
 
     /// `list.resetToDefault()` — `push key; pushs [null, null, 0]; ins 1`.
@@ -1361,19 +1426,19 @@ impl<T: LedgerRepr, P: LedgerPath> LedgerList<T, P> {
     ///
     /// The one M16 operation with corpus provenance: it is
     /// `test-caller-contract`'s `requestLog.pushFront(requestId)`.
-    pub fn push_front(&self, c: &mut Circuit3, value: &T) {
-        let value = value.ledger_value(c);
+    pub fn push_front(&self, c: &mut Circuit3, value: &impl Fresh<T>) {
+        let value = stored(c, value, "a list push's value");
         emit(c, &list_push_front_at(&self.ledger_path(), &value));
     }
 
     /// `list.head()` — the first element, or `None` on the empty list.
-    pub fn head(&self, c: &mut Circuit3) -> Maybe<T, Public> {
+    pub fn head(&self, c: &mut Circuit3) -> Assumed<Maybe<T, Public>> {
         let mut limbs = list_head_at(c, &self.ledger_path(), T::atoms());
         let value = T::from_limbs(limbs.split_off(1));
-        Maybe {
+        Assumed::of_read(Maybe {
             is_some: Bool::from_field_unchecked(limbs[0]),
             value,
-        }
+        })
     }
 }
 
@@ -1508,14 +1573,14 @@ impl<const DEPTH: u8, T, P: LedgerPath> LedgerMerkleTree<DEPTH, T, P> {
     }
 
     /// `t.isFull()` — `!(next < 2^DEPTH)`.
-    pub fn is_full(&self, c: &mut Circuit3) -> Bool<Public> {
-        Bool::from_field_unchecked(merkle_tree_is_full_at(c, &self.ledger_path(), DEPTH))
+    pub fn is_full(&self, c: &mut Circuit3) -> Assumed<Bool<Public>> {
+        Assumed::of_read(Bool::from_field_unchecked(merkle_tree_is_full_at(c, &self.ledger_path(), DEPTH)))
     }
 
     /// `t.checkRoot(rt)` — whether `rt` is the tree's CURRENT root.
-    pub fn check_root(&self, c: &mut Circuit3, root: MerkleTreeDigest<Public>) -> Bool<Public> {
+    pub fn check_root(&self, c: &mut Circuit3, root: MerkleTreeDigest<Public>) -> Assumed<Bool<Public>> {
         let root = root.ledger_value(c);
-        Bool::from_field_unchecked(merkle_tree_check_root_at(c, &self.ledger_path(), &root))
+        Assumed::of_read(Bool::from_field_unchecked(merkle_tree_check_root_at(c, &self.ledger_path(), &root)))
     }
 
     /// `t.insertHash(hash)` — insert a leaf whose digest is already known, at
@@ -1550,14 +1615,16 @@ impl<const DEPTH: u8, T, P: LedgerPath> LedgerMerkleTree<DEPTH, T, P> {
 impl<const DEPTH: u8, T: LedgerRepr, P: LedgerPath> LedgerMerkleTree<DEPTH, T, P> {
     /// `t.insert(item)` — hash the item into a leaf and insert it at the
     /// first free index.
-    pub fn insert(&self, c: &mut Circuit3, item: &T) {
-        let hash = leaf_hash(c, item);
+    pub fn insert(&self, c: &mut Circuit3, item: &impl Fresh<T>) {
+        let _ = stored(c, item, "a merkle-tree insert's item");
+        let hash = leaf_hash(c, item.fresh());
         self.insert_hash(c, &hash);
     }
 
     /// `t.insertIndex(item, at)` — hash the item and insert it at `at`.
-    pub fn insert_index(&self, c: &mut Circuit3, item: &T, at: Uint<64, Public>) {
-        let hash = leaf_hash(c, item);
+    pub fn insert_index(&self, c: &mut Circuit3, item: &impl Fresh<T>, at: Uint<64, Public>) {
+        let _ = stored(c, item, "a merkle-tree insert's item");
+        let hash = leaf_hash(c, item.fresh());
         self.insert_hash_index(c, &hash, at);
     }
 
@@ -1640,16 +1707,16 @@ impl<const DEPTH: u8, T, P: LedgerPath> LedgerHistoricMerkleTree<DEPTH, T, P> {
 
     /// `t.isFull()` — the same stream [`LedgerMerkleTree::is_full`] emits;
     /// the history does not affect capacity.
-    pub fn is_full(&self, c: &mut Circuit3) -> Bool<Public> {
-        Bool::from_field_unchecked(merkle_tree_is_full_at(c, &self.ledger_path(), DEPTH))
+    pub fn is_full(&self, c: &mut Circuit3) -> Assumed<Bool<Public>> {
+        Assumed::of_read(Bool::from_field_unchecked(merkle_tree_is_full_at(c, &self.ledger_path(), DEPTH)))
     }
 
     /// `t.checkRoot(rt)` — whether `rt` is one of the tree's PAST roots.
-    pub fn check_root(&self, c: &mut Circuit3, root: MerkleTreeDigest<Public>) -> Bool<Public> {
+    pub fn check_root(&self, c: &mut Circuit3, root: MerkleTreeDigest<Public>) -> Assumed<Bool<Public>> {
         let root = root.ledger_value(c);
-        Bool::from_field_unchecked(historic_merkle_tree_check_root_at(
+        Assumed::of_read(Bool::from_field_unchecked(historic_merkle_tree_check_root_at(
             c, &self.ledger_path(), &root,
-        ))
+        )))
     }
 
     /// `t.insertHash(hash)` — insert a known digest at the first free index,
@@ -1688,14 +1755,16 @@ impl<const DEPTH: u8, T, P: LedgerPath> LedgerHistoricMerkleTree<DEPTH, T, P> {
 
 impl<const DEPTH: u8, T: LedgerRepr, P: LedgerPath> LedgerHistoricMerkleTree<DEPTH, T, P> {
     /// `t.insert(item)`.
-    pub fn insert(&self, c: &mut Circuit3, item: &T) {
-        let hash = leaf_hash(c, item);
+    pub fn insert(&self, c: &mut Circuit3, item: &impl Fresh<T>) {
+        let _ = stored(c, item, "a merkle-tree insert's item");
+        let hash = leaf_hash(c, item.fresh());
         self.insert_hash(c, &hash);
     }
 
     /// `t.insertIndex(item, at)`.
-    pub fn insert_index(&self, c: &mut Circuit3, item: &T, at: Uint<64, Public>) {
-        let hash = leaf_hash(c, item);
+    pub fn insert_index(&self, c: &mut Circuit3, item: &impl Fresh<T>, at: Uint<64, Public>) {
+        let _ = stored(c, item, "a merkle-tree insert's item");
+        let hash = leaf_hash(c, item.fresh());
         self.insert_hash_index(c, &hash, at);
     }
 
@@ -1790,56 +1859,16 @@ impl<T> LedgerCell<T> {
 
 impl<T: LedgerRepr> LedgerCell<T> {
     /// `x` (a Cell read) — `dup 0; idx [field]; popeq`.
-    pub fn read(&self, c: &mut Circuit3) -> T {
+    pub fn read(&self, c: &mut Circuit3) -> Assumed<T> {
         let (value, embed) = T::witness_read(c);
         cell_read_embedded_at(c, &self.ledger_path(), &embed);
-        value
+        Assumed::of_read(value)
     }
 
     /// `x = value` — `push key; pushs value; ins 1`.
-    pub fn write(&self, c: &mut Circuit3, value: &T) {
-        let value = value.ledger_value(c);
+    pub fn write(&self, c: &mut Circuit3, value: &impl Fresh<T>) {
+        let value = stored(c, value, "a cell write's value");
         emit(c, &cell_write_at(&self.ledger_path(), &value));
-    }
-
-    /// THE BLIND SNAPSHOT (M40): `map[key] = x` with the circuit never
-    /// learning `x` — `idxp m; push key; dup 2·len(m)+1; idx f; ins 1;
-    /// insc len(m)`, no `popeq`, no public input, nothing to go stale. The
-    /// map's value type is this cell's, by the signature.
-    ///
-    /// Not expressible in Compact, whose `m.insert(k, x)` READS `x` first;
-    /// the gate is the on-chain VM (`tests/v3_blind.rs`).
-    pub fn snapshot_into<K: LedgerRepr, P: LedgerPath>(
-        &self,
-        c: &mut Circuit3,
-        map: &LedgerMap<K, T, P>,
-        key: &K,
-    ) {
-        let key = key.ledger_value(c);
-        emit(
-            c,
-            &cell_snapshot_into_map_at(&self.ledger_path(), &map.ledger_path(), &key),
-        );
-    }
-
-    /// THE BLIND COMBINE (M40): `x ⊕= delta` for a [`Primitive`] step whose
-    /// accumulator is this one cell — `cell.combine_blind(c, Max, &h)`.
-    /// [`First`](super::blind::First) needs a flag cell beside the value and
-    /// is rejected here by its `Acc` type; it is driven through
-    /// [`Primitive::combine_blind`] on a [`FirstAcc`](super::blind::FirstAcc):
-    ///
-    /// ```compile_fail
-    /// # use minocrab::v3::{Circuit3, FieldT};
-    /// # use minocrab::Public;
-    /// # use minocrab_std::v3::{blind::First, LedgerCell, Uint};
-    /// # let mut c = Circuit3::new();
-    /// # let d = Uint::<64, Public>::from_field_unchecked(c.arg::<FieldT>("d").public());
-    /// const N: LedgerCell<Uint<64, Public>> = LedgerCell::at(0);
-    /// // error[E0271]: type mismatch resolving `<First as Primitive<Uint<64, Public>>>::Acc == LedgerCell<Uint<64, Public>>`
-    /// N.combine_blind(&mut c, First, &d);
-    /// ```
-    pub fn combine_blind<O: Primitive<T, Acc = LedgerCell<T>>>(&self, c: &mut Circuit3, _op: O, delta: &T) {
-        O::combine_blind(c, self, delta)
     }
 }
 
@@ -1894,8 +1923,8 @@ impl<P: LedgerPath> LedgerCounter<P> {
     }
 
     /// `n` (a Counter read) — `dup 0; idx [field]; popeqc`.
-    pub fn read(&self, c: &mut Circuit3) -> Uint<64, Public> {
-        Uint::from_field_unchecked(counter_read_at(c, &self.ledger_path()))
+    pub fn read(&self, c: &mut Circuit3) -> Assumed<Uint<64, Public>> {
+        Assumed::of_read(Uint::from_field_unchecked(counter_read_at(c, &self.ledger_path())))
     }
 
     /// `n.resetToDefault()` — `push key; pushs (cell 0u64); ins 1`, the
@@ -1912,12 +1941,12 @@ impl<P: LedgerPath> LedgerCounter<P> {
 
     /// `n.lessThan(threshold)` — `dup 0; idx [field]; push threshold; lt;
     /// popeqc`.
-    pub fn less_than(&self, c: &mut Circuit3, threshold: u64) -> Bool<Public> {
+    pub fn less_than(&self, c: &mut Circuit3, threshold: u64) -> Assumed<Bool<Public>> {
         let threshold = LedgerValue::bytes(
             8,
             vec![ImpactElem::Imm(minocrab::Fr::from(threshold))],
         );
-        Bool::from_field_unchecked(counter_less_than_at(c, &self.ledger_path(), &threshold))
+        Assumed::of_read(Bool::from_field_unchecked(counter_less_than_at(c, &self.ledger_path(), &threshold)))
     }
 }
 

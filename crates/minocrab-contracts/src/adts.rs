@@ -79,7 +79,7 @@ impl Adts {
         x: B32<Private>,
     ) -> Discloses<(Element,), Bool<Public>> {
         let x = x.disclose_as::<Element>(c);
-        Discloses::of(ADTS.s.member(c, &x))
+        Discloses::of(*ADTS.s.member(c, &x))
     }
 
     /// `export circuit setRemove(x: Bytes<32>): [] { s.remove(disclose(x)); }`
@@ -93,13 +93,13 @@ impl Adts {
     /// `export circuit setSize(): Uint<64> { return s.size(); }`
     #[circuit(output = "size")]
     pub fn set_size(c: &mut Circuit3) -> Discloses<(), Uint<64, Public>> {
-        Discloses::of(ADTS.s.size(c))
+        Discloses::of(*ADTS.s.size(c))
     }
 
     /// `export circuit setIsEmpty(): Boolean { return s.isEmpty(); }`
     #[circuit(output = "empty")]
     pub fn set_is_empty(c: &mut Circuit3) -> Discloses<(), Bool<Public>> {
-        Discloses::of(ADTS.s.is_empty(c))
+        Discloses::of(*ADTS.s.is_empty(c))
     }
 
     /// `export circuit setReset(): [] { s.resetToDefault(); }`
@@ -133,19 +133,19 @@ impl Adts {
     /// `export circuit listHead(): Maybe<Bytes<32>> { return l.head(); }`
     #[circuit(output = "head")]
     pub fn list_head(c: &mut Circuit3) -> Discloses<(), Maybe<B32<Public>, Public>> {
-        Discloses::of(ADTS.l.head(c))
+        Discloses::of(*ADTS.l.head(c))
     }
 
     /// `export circuit listLength(): Uint<64> { return l.length(); }`
     #[circuit(output = "length")]
     pub fn list_length(c: &mut Circuit3) -> Discloses<(), Uint<64, Public>> {
-        Discloses::of(ADTS.l.length(c))
+        Discloses::of(*ADTS.l.length(c))
     }
 
     /// `export circuit listIsEmpty(): Boolean { return l.isEmpty(); }`
     #[circuit(output = "empty")]
     pub fn list_is_empty(c: &mut Circuit3) -> Discloses<(), Bool<Public>> {
-        Discloses::of(ADTS.l.is_empty(c))
+        Discloses::of(*ADTS.l.is_empty(c))
     }
 
     /// `export circuit listReset(): [] { l.resetToDefault(); }`
@@ -231,13 +231,13 @@ impl Adts {
         r: MerkleTreeDigest,
     ) -> Discloses<(Root,), Bool<Public>> {
         let r = r.disclose_as::<Root>(c);
-        Discloses::of(ADTS.mt.check_root(c, r))
+        Discloses::of(*ADTS.mt.check_root(c, r))
     }
 
     /// `export circuit mtIsFull(): Boolean { return mt.isFull(); }`
     #[circuit(output = "full")]
     pub fn mt_is_full(c: &mut Circuit3) -> Discloses<(), Bool<Public>> {
-        Discloses::of(ADTS.mt.is_full(c))
+        Discloses::of(*ADTS.mt.is_full(c))
     }
 
     /// `export circuit mtReset(): [] { mt.resetToDefault(); }`
@@ -309,13 +309,13 @@ impl Adts {
         r: MerkleTreeDigest,
     ) -> Discloses<(Root,), Bool<Public>> {
         let r = r.disclose_as::<Root>(c);
-        Discloses::of(ADTS.hmt.check_root(c, r))
+        Discloses::of(*ADTS.hmt.check_root(c, r))
     }
 
     /// `export circuit hmtIsFull(): Boolean { return hmt.isFull(); }`
     #[circuit(output = "full")]
     pub fn hmt_is_full(c: &mut Circuit3) -> Discloses<(), Bool<Public>> {
-        Discloses::of(ADTS.hmt.is_full(c))
+        Discloses::of(*ADTS.hmt.is_full(c))
     }
 
     /// `export circuit hmtResetHistory(): [] { hmt.resetHistory(); }`
