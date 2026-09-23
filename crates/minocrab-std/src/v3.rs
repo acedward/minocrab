@@ -387,11 +387,19 @@ pub use minocrab_macros::LedgerRepr;
 /// struct Nameless;
 /// ```
 ///
-/// THE SAME RULES HOLD FOR A STANDARD WRITTEN BY HAND. `LedgerWidth` is an
-/// ordinary trait, but its `PLACEMENT` can say "root header" only as
-/// `Placement::root_header::<S>()`, which names a `LedgerHeader` and checks
-/// its magic, and `#[derive(Ledger)]` checks the rest. A hand-written
-/// standard that follows them compiles and is laid out like a derived one:
+/// THE MAGIC, PLACEMENT, WIDTH AND ONE-STANDARD RULES HOLD FOR A STANDARD
+/// WRITTEN BY HAND. `LedgerWidth` is an ordinary trait, but its `PLACEMENT`
+/// can say "root header" only as `Placement::root_header::<S>()`, which
+/// names a `LedgerHeader` and checks its magic, and `#[derive(Ledger)]`
+/// checks each standard's zero `WIDTH` and that there is at most one. The
+/// FIELD rules above (at most 15 named fields, each a single-field std
+/// slot, a magic-only standard one Cell at `[0]`) are the derive's, because
+/// it lays the fields out: a hand-written standard lays out and contributes
+/// its own, so keeping them is its author's job. Nothing refuses a breach
+/// at compile time; sixteen or more header entries, for one, fail only at
+/// `build()`, on the ledger's sixteen-entry Array bound. A hand-written
+/// standard that follows the rules compiles and is laid out like a derived
+/// one:
 ///
 /// ```
 /// use minocrab_std::v3::{
@@ -462,7 +470,11 @@ pub use minocrab_macros::LedgerRepr;
 /// ```
 ///
 /// …and from a reader's `implements`, whatever the type's placement (32
-/// zero bytes are what a never-written `Bytes<32>` first field holds):
+/// zero bytes are what a never-written `Bytes<32>` first field holds). Its
+/// check is an inline `const` evaluated when the call is monomorphized, so
+/// the E0080 surfaces in `cargo build` / `cargo test`, not in
+/// `cargo check`, clippy or rust-analyzer (the placement check above
+/// surfaces in `cargo check` too):
 ///
 /// ```compile_fail
 /// use minocrab_std::v3::{implements, LedgerHeader, LedgerWidth, StateBuilder};

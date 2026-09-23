@@ -82,9 +82,14 @@ pub fn data_only_bytes(data: StateValue<InMemoryDB>) -> Vec<u8> {
 /// off, `well_formed` also swallows an error from the fee calculation, so
 /// the fee is computed separately below and must succeed.
 ///
-/// LIMITS stay ON (`enforce_limits`, the default): the transaction's size
-/// and every block-limit check the node runs apply to these deploys, the
-/// sixteen-entry roots and the 256-own-field block included.
+/// LIMITS stay ON. `enforce_limits` (the default) is the transaction-size
+/// check: `well_formed` refuses a transaction whose serialized size exceeds
+/// the ledger's `transaction_byte_limit`. The block limits and the
+/// time-to-dismiss bound are not `enforce_limits`'s: they come from the
+/// separate `fees(params, true)` call in `deploy` below
+/// (`BlockLimitExceeded`, `OutsideTimeToDismiss`), which must be `Ok`. Both
+/// apply to every deploy here, the sixteen-entry roots and the
+/// 256-own-field block included.
 fn unbalanced_strictness() -> WellFormedStrictness {
     let mut s = WellFormedStrictness::default();
     s.enforce_balancing = false;

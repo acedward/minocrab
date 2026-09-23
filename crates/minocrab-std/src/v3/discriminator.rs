@@ -148,7 +148,11 @@ pub fn contract_state_discriminator(bytes: &[u8]) -> std::io::Result<Option<[u8;
 ///
 /// `S::MAGIC` all zero is E0080 here too, however `S` was written: 32 zero
 /// bytes are what a never-written `Bytes<32>` first field holds, so such an
-/// `S` would be "implemented" by every contract that starts with one.
+/// `S` would be "implemented" by every contract that starts with one. The
+/// check is an inline `const` evaluated when the call is monomorphized, so
+/// the error surfaces in `cargo build` / `cargo test`, not in `cargo check`,
+/// clippy or rust-analyzer (the placement check, which `#[derive(Ledger)]`
+/// evaluates in a free `const`, surfaces in `cargo check` too).
 pub fn implements<S: LedgerHeader>(state: &StateValue<impl DB>) -> bool {
     const { assert_magic(&S::MAGIC) };
     discriminator(state) == Some(S::MAGIC)

@@ -93,7 +93,10 @@ pub trait LedgerHeader: LedgerWidth {
     /// standard with fields). Not all zero — E0080 wherever the standard is
     /// used as one: its placement (`Placement::root_header`), its deploy
     /// state (`StateBuilder::magic`), a reader's `implements`, and the
-    /// derive's own check.
+    /// derive's own check. The deploy state's and the reader's checks are
+    /// inline `const`s evaluated when the call is monomorphized: they
+    /// surface in `cargo build` / `cargo test`, not in `cargo check`, clippy
+    /// or rust-analyzer.
     const MAGIC: [u8; 32];
 }
 

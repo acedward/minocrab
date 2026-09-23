@@ -169,10 +169,12 @@ impl StateBuilder {
     /// expansion, or a hand-written standard's).
     ///
     /// Refused: an all-zero `S::MAGIC` (E0080, the magic check in an inline
-    /// `const`); a path other than `[0]` or `[0, 0]` (no [`Magic`] has one:
-    /// `Magic::at_path` refuses it); and a SECOND magic in one state — a
-    /// panic naming the one-standard rule, because only a standard hidden
-    /// in a group slot gets that far (`LedgerWidth`'s docs).
+    /// `const` evaluated when the call is monomorphized, so the error
+    /// surfaces in `cargo build` / `cargo test`, not in `cargo check`,
+    /// clippy or rust-analyzer); a path other than `[0]` or `[0, 0]` (no
+    /// [`Magic`] has one: `Magic::at_path` refuses it); and a SECOND magic
+    /// in one state — a panic naming the one-standard rule, because only a
+    /// standard hidden in a group slot gets that far (`LedgerWidth`'s docs).
     #[doc(hidden)]
     pub fn magic<S: LedgerHeader>(&mut self, magic: Magic) {
         const { assert_magic(&S::MAGIC) };
