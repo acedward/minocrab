@@ -106,7 +106,7 @@ Blind stream accumulators start at their cells' DEFAULT (0, false): the identity
 
 =InitialState= is a new requirement: every slot type of a derived block implements it. All in-tree ones do: the eight std slots, tuples to 4, =FirstAcc=, =Stream= (through a new required =Step::contribute=), =Signet=, =Pending=, =Fired=, =Outbox=, and every standard through its derive. A =Pending=, =Fired= or =Outbox= does NOT contribute its copy of the block's Signet; the =Signet= field does. A downstream custom slot without the impl gets E0277 with the trait's =on_unimplemented= message ("Compatibility" below).
 
-Test support: =crates/minocrab-contracts/tests/ledger_deploy/deploy.rs= wraps a state into =ContractState= / =ContractDeploy=, checks the ledger's =well_formed= and applies it to an in-process =LedgerState=.
+Test support: =crates/minocrab-contracts/tests/ledger_deploy/deploy.rs= wraps a state into =ContractState= / =ContractDeploy=, computes the transaction's fee, checks the ledger's =well_formed= with its LIMITS on and applies it to an in-process =LedgerState=. Only balancing is off, because nothing in the workspace can pay a fee (no wallet).
 
 * The reader
 
@@ -226,7 +226,7 @@ Gates:
 | layout | minocrab-std =v3::ledger= unit tests, =tests/v3_header.rs= | every body size 0..=256 against =batch= + 1, the frozen fifteen, the literal paths, declaration-order independence, both header shapes |
 | composite slots | =tests/ledger_header.rs= | a headed treasury and outbox byte-identical to compactc twins; the notification carries =1 ‖ [6]= |
 | rejections | compile_fail doctests on =v3::LedgerHeader= and =Signet=; =tests/v3_state.rs= | one per mistake in the table above, hand-written standards included; the run-time refusals (a nested standard, a missing or extra magic, a =Magic= elsewhere, =set='s Array shapes) |
-| deploy + VM | =tests/v3_state.rs=, =tests/ledger_deploy.rs= | the builder equals the resets run through the VM; 18 headed blocks at 0, 1, 14, 15, 16, 30, 211, 225, 226 own fields deploy (=well_formed=, =apply=) and circuits at the first, a middle and the last field land on the rule with the magic bit-identical; the states byte-equal to compactc's JS |
+| deploy + VM | =tests/v3_state.rs=, =tests/ledger_deploy.rs= | the builder equals the resets run through the VM; 20 headed blocks at 0, 1, 14, 15, 16, 30, 211, 225, 226 and 256 own fields deploy (fee computed, =well_formed= with limits on, =apply=) and circuits at the first, a middle and the last field land on the rule with the magic bit-identical; the states byte-equal to compactc's JS |
 | reader | =tests/v3_discriminator.rs=, =ledger_deploy.rs= =t5_*= | every shape the rule reads or refuses; the deployed states and compactc's own bytes at =[0]=, =[0,0]=, =[0,0,0]=; malformed bytes are errors |
 | compactc parity | =tests/header_small_differential.rs= + fixtures =header_small=, =header_n15=, =header_n16= | ZKIR, layout, initial state and whole =ContractState= at 4 and 14 own fields; the negative control at 15 |
 | cost | =tests/ledger_header.rs= =t8_*= | the table above |

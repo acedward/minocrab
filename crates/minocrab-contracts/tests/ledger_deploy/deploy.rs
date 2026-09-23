@@ -12,8 +12,9 @@
 //! needs one — they run circuits against the deployed `data` through
 //! `QueryContext::query` (the executor), which is where a circuit meets the
 //! ledger's state. What the deploy proves is that the ledger ACCEPTS the
-//! state (its shape, its sixteen-entry roots, its sealed magic) and stores
-//! it verbatim.
+//! state (its shape, its sixteen-entry roots, its sealed magic) under its
+//! LIMITS, with a computable fee, and stores it verbatim. Only balancing is
+//! off: nothing here can pay (see `unbalanced_strictness`).
 
 use midnight_base_crypto::time::{Duration, Timestamp};
 use midnight_coin_structure::contract::ContractAddress;
@@ -73,12 +74,24 @@ pub fn data_only_bytes(data: StateValue<InMemoryDB>) -> Vec<u8> {
     bytes
 }
 
-/// Balancing and limits off: nothing here pays a DUST fee (no wallet in the
-/// workspace), exactly as the singleton's deploy gate.
+/// The ledger's default strictness with BALANCING off, and nothing else.
+///
+/// Balancing is off because nothing here can pay a DUST fee: the workspace
+/// has no wallet, so a deploy cannot carry the fee inputs that balancing
+/// asks for (the singleton's deploy gate does the same). With balancing
+/// off, `well_formed` also swallows an error from the fee calculation, so
+/// the fee is computed separately below and must succeed.
+///
+/// LIMITS stay ON (`enforce_limits`, the default): the transaction's size
+/// and every block-limit check the node runs apply to these deploys, the
+/// sixteen-entry roots and the 256-own-field block included.
 fn unbalanced_strictness() -> WellFormedStrictness {
     let mut s = WellFormedStrictness::default();
     s.enforce_balancing = false;
-    s.enforce_limits = false;
+    assert!(
+        s.enforce_limits,
+        "the ledger's default strictness enforces limits"
+    );
     s
 }
 
@@ -93,6 +106,10 @@ pub fn deploy(data: StateValue<InMemoryDB>) -> Deployed {
     let intent =
         build_intent(&mut rng, vec![], tblock + Duration::from_secs(3600)).add_deploy(deploy);
     let tx = preimage_tx(NETWORK_ID, SEGMENT, intent);
+    // The fee the node would charge: computable (no block-limit or
+    // time-to-dismiss error), though nothing pays it here.
+    tx.fees(&ledger.parameters, true)
+        .unwrap_or_else(|e| panic!("the deploy's fee cannot be computed: {e:?}"));
     let vtx = tx
         .well_formed(&ledger, unbalanced_strictness(), tblock)
         .unwrap_or_else(|e| panic!("the deploy is not well formed: {e:?}"));
