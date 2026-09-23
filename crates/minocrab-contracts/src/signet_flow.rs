@@ -83,8 +83,9 @@ use minocrab_std::v3::borsh::{BorshReader, CircuitBorsh, FieldSpec, LayoutPath, 
 use minocrab_std::v3::Serializer;
 use minocrab_std::v3::Assumed;
 use minocrab_std::v3::{
-    is_true, kernel, label, not, ArgPath, CircuitAbi, CircuitArg, Disclose, LedgerCell,
-    LedgerCounter, LedgerField, LedgerMap, LedgerRepr, LedgerWidth, Prim, Secp256k1Point, Uint,
+    is_true, kernel, label, not, ArgPath, BlockLayout, CircuitAbi, CircuitArg, Disclose,
+    InitialState, LedgerCell, LedgerCounter, LedgerField, LedgerMap, LedgerRepr, LedgerWidth, Prim,
+    Secp256k1Point, StateBuilder, Uint,
 };
 use signet_signer_interface::notification::construct_notification_v1;
 use signet_signer_interface::{RequestId, SignetSigner};
@@ -177,6 +178,39 @@ impl<R: CircuitBorsh<Private>> CircuitBorsh<Private> for Attested<R> {
 /// chain id, caip2 id and nonce from CONTEXT and `Pending::settle` the MPC
 /// key — none of them is an argument a circuit can pass wrongly. The
 /// `signer` cell is `sealed` (written at deployment, never by a circuit).
+///
+/// A block with a STANDARD (`#[derive(LedgerHeader)]`) keeps its Signet in
+/// the BODY, laid out one root slot along like every other body field. It
+/// cannot live inside the standard — five fields are not one header entry,
+/// and the derive threads a block's Signet from the block's own fields:
+///
+/// ```compile_fail
+/// use minocrab_contracts::signet_flow::Signet;
+/// use minocrab_std::v3::{pad32, LedgerHeader};
+///
+/// // error[E0277]: `Signet` cannot be a field of a ledger standard
+/// #[derive(LedgerHeader)]
+/// struct SignetStandard { signet: Signet }
+/// impl LedgerHeader for SignetStandard { const MAGIC: [u8; 32] = pad32(b"signet"); }
+/// ```
+///
+/// while the same standard beside the Signet compiles, the Signet at
+/// `[1]..[5]`:
+///
+/// ```
+/// use minocrab_contracts::signet_flow::Signet;
+/// use minocrab_std::v3::{pad32, Ledger, LedgerHeader};
+///
+/// #[derive(LedgerHeader)]
+/// struct Standard;
+/// impl LedgerHeader for Standard { const MAGIC: [u8; 32] = pad32(b"signet"); }
+///
+/// #[derive(Ledger)]
+/// struct Block { signet: Signet, std: Standard }
+/// const BLOCK: Block = Block::new();
+/// assert_eq!(BLOCK.signet.signer.field_path().as_slice(), &[1]);
+/// assert_eq!(BLOCK.signet.evm_chain_id.index(), 5);
+/// ```
 pub struct Signet {
     /// `sealed ledger signetSigner: SignetSigner` — the singleton's address.
     pub signer: LedgerField,
@@ -194,16 +228,23 @@ pub struct Signet {
 }
 
 impl Signet {
-    /// The five fields from flat index `start` of a block of `total` fields
-    /// (what `#[derive(Ledger)]` calls).
-    pub const fn at_block(total: usize, start: usize) -> Self {
+    /// The five fields from flat body index `start` under `layout` (what
+    /// `#[derive(Ledger)]` calls). In a block with a standard the five
+    /// follow the headed layout like every other body field.
+    pub const fn at_layout(layout: BlockLayout, start: usize) -> Self {
         Signet {
-            signer: LedgerField::at_block(total, start),
-            mpc_response_key: LedgerCell::at_block(total, start + 1),
-            request_nonce: LedgerCounter::at_block(total, start + 2),
-            caip2_id: LedgerCell::at_block(total, start + 3),
-            evm_chain_id: LedgerCell::at_block(total, start + 4),
+            signer: LedgerField::at_layout(layout, start),
+            mpc_response_key: LedgerCell::at_layout(layout, start + 1),
+            request_nonce: LedgerCounter::at_layout(layout, start + 2),
+            caip2_id: LedgerCell::at_layout(layout, start + 3),
+            evm_chain_id: LedgerCell::at_layout(layout, start + 4),
         }
+    }
+
+    /// The five fields from flat index `start` of a block of `total`
+    /// fields, at compactc's layout.
+    pub const fn at_block(total: usize, start: usize) -> Self {
+        Signet::at_layout(BlockLayout::compactc(total), start)
     }
 
     /// The deployment's writes, for a contract's `initialize`: the MPC key
@@ -229,6 +270,20 @@ impl Signet {
 
 impl LedgerWidth for Signet {
     const WIDTH: usize = 5;
+}
+
+/// The five fields at deploy: the MPC key, caip2 id and chain id at their
+/// types' defaults, the nonce at zero, and the SEALED signer cell Null —
+/// it is a `LedgerField`, untyped, so the deployer `set`s the singleton's
+/// address the way the Compact constructor would.
+impl InitialState for Signet {
+    fn contribute(&self, state: &mut StateBuilder) {
+        self.signer.contribute(state);
+        self.mpc_response_key.contribute(state);
+        self.request_nonce.contribute(state);
+        self.caip2_id.contribute(state);
+        self.evm_chain_id.contribute(state);
+    }
 }
 
 // ---- the request ---------------------------------------------------------------------

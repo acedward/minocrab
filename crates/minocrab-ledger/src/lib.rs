@@ -88,6 +88,9 @@ pub use ops::{
     set_insert, set_insert_at, set_insert_coin, set_insert_coin_at, set_remove, set_remove_at,
     set_reset, set_reset_at,
 };
+/// The deploy state's values (notes/ledger-header.org): what a fresh field
+/// holds, beside the `empty_*` constants its reset pushes.
+pub use ops::{historic_merkle_tree_reset_value, stored_cell};
 pub use reads::{
     cell_read, cell_read_at, cell_read_embedded, cell_read_embedded_at,
     counter_less_than, counter_less_than_at, counter_read, counter_read_at,

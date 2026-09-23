@@ -64,6 +64,13 @@ use super::{
     Secp256k1Point, ShieldedCoinInfo3, TsType, Uint, UserAddress, B32,
 };
 
+// The deploy state (`super::state`, notes/ledger-header.org).
+use super::state::{InitialState, StateBuilder};
+// A standard's placement names its magic (`super::header`).
+use super::header::{assert_magic, LedgerHeader};
+use midnight_onchain_state::state::StateValue;
+use minocrab_ledger::{historic_merkle_tree_reset_value, stored_cell};
+
 /// What a ledger slot's key or value type must be able to do: name its FAB
 /// atoms, hand over its limbs, and be rebuilt from the limbs a read witnesses.
 ///
@@ -98,6 +105,32 @@ use super::{
 pub trait LedgerRepr: Sized {
     /// This type's FAB atoms, in slot order.
     fn atoms() -> Vec<AlignmentAtom>;
+
+    /// This type's DEFAULT — Compact's `default<T>` — as the ledger STORES
+    /// it in a `Cell`: one byte string per [`LedgerRepr::atoms`] entry, in
+    /// slot order. What compactc's generated `initialState` writes into a
+    /// fresh `Cell<Self>` with the field's `resetToDefault`, and so what the
+    /// deploy builder puts there ([`super::StateBuilder`],
+    /// notes/ledger-header.org). The builder stores each atom in FAB normal
+    /// form, so full-width zeros and the empty atom are one value.
+    ///
+    /// ZERO in every atom — this provided body — for every type but the two
+    /// curve points, whose Compact default is their group IDENTITY and not
+    /// zero ([`Secp256k1Point`] and [`JubjubPoint`] override it; compactc's
+    /// JS writes `{x: 0, y: 0, identity: true}` and `{x: 0, y: 1}`). A
+    /// composite of other `LedgerRepr` types is its fields' defaults in
+    /// order, which `#[derive(LedgerRepr)]` emits; a hand-written composite
+    /// composes its components' defaults the same way — a GENERIC one
+    /// always, because its type parameter may be a point (the `evm_flow`
+    /// wrappers `Owned`, `HandleOwned`, `QueueEntry`, `Outstanding` do).
+    /// (`Maybe` and `Either` cannot hold a point at all: a point is not a
+    /// `CallResult`.)
+    ///
+    /// Off-chain only: no circuit reads this — a circuit's own default is
+    /// [`minocrab_ledger::default_value`]'s zero limbs.
+    fn default_stored() -> Vec<Vec<u8>> {
+        Self::atoms().iter().map(|_| Vec::new()).collect()
+    }
 
     /// This value's limbs, in slot order.
     ///
@@ -246,6 +279,22 @@ impl LedgerRepr for Secp256k1Point<Public> {
         <Secp256k1Point<Public> as CircuitAbi>::atoms()
     }
 
+    /// Compact's default point, `{x: 0, y: 0, identity: true}`, as
+    /// compact-runtime 0.19.0 stores it: each coordinate goes through the
+    /// ZKIR representation's `v − 1 mod p` (so 0 is `p − 1`), low 192 bits
+    /// then high 64, and the identity flag is the `field` atom 1
+    /// (`CompactTypeSecp256k1Base.toValue`, runtime `compact-types.ts`).
+    /// Pinned against compactc's own `initialState` by the T4b oracle
+    /// fixture (`tests/fixtures/initial_state/e_adts.state.hex`).
+    fn default_stored() -> Vec<Vec<u8>> {
+        // p − 1 = 0xFFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFE_FFFFFC2E,
+        // little-endian.
+        let mut low192 = vec![0xff; 24];
+        low192[..5].copy_from_slice(&[0x2e, 0xfc, 0xff, 0xff, 0xfe]);
+        let high64 = vec![0xff; 8];
+        vec![low192.clone(), high64.clone(), low192, high64, vec![1]]
+    }
+
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
         limbs.extend(c.encode(self.point()));
     }
@@ -296,6 +345,13 @@ impl ProofWires for JubjubPoint<Public> {
 impl LedgerRepr for JubjubPoint<Public> {
     fn atoms() -> Vec<AlignmentAtom> {
         <JubjubPoint<Public> as CircuitAbi>::atoms()
+    }
+
+    /// Compact's default point is the curve's identity, `{x: 0, y: 1}`
+    /// (compactc's JS), stored as its two `field` atoms. Pinned by the T4b
+    /// oracle fixture beside [`Secp256k1Point`]'s.
+    fn default_stored() -> Vec<Vec<u8>> {
+        vec![Vec::new(), vec![1]]
     }
 
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
@@ -592,6 +648,45 @@ impl FieldPath {
     /// `minocrab-macros` (`field_paths`) is pinned against this one by the
     /// derive's tests.
     pub const fn in_block(total: usize, index: usize) -> Self {
+        FieldPath::batched(total, index, SEGMENT)
+    }
+
+    /// The path of BODY field `index` under `layout` — what every slot's
+    /// `at_layout` calls, and so what `#[derive(Ledger)]` lays a block out
+    /// by.
+    ///
+    /// - [`BlockLayout::compactc`]: exactly [`Self::in_block`], so a block
+    ///   without a standard is compactc's layout, path for path.
+    /// - [`BlockLayout::headed`]: the body segmented by its OWN frozen width
+    ///   ([`HEADED_SEGMENT`], fifteen — the rule notes/ledger-header.org
+    ///   freezes, so a future compactc that segments at sixteen moves no
+    ///   headed contract), remainder first, then the first element moved
+    ///   one root slot along: `root[0]` is the standard's. The depth is
+    ///   compactc's for the same body count, so no body field pays for the
+    ///   header, and the root holds at most `1 + 15` entries — the ledger's
+    ///   sixteen.
+    pub const fn in_layout(layout: BlockLayout, index: usize) -> Self {
+        let mut path = if layout.root_offset == 0 {
+            FieldPath::in_block(layout.total, index)
+        } else {
+            FieldPath::batched(layout.total, index, HEADED_SEGMENT)
+        };
+        let first = path.elems[0] as usize + layout.root_offset as usize;
+        assert!(
+            first < MAX_ROOT_ENTRIES,
+            "a ledger block's root holds at most sixteen entries (the ledger's \
+             Array bound): the standard at [0] and the body's top-level \
+             segments at [1..16)"
+        );
+        path.elems[0] = first as u8;
+        path
+    }
+
+    /// `batch` at segment width `segment`, walked from the leaf up — the
+    /// one loop both layouts share. `in_block` is it at compactc's width,
+    /// a headed body at [`HEADED_SEGMENT`]; the two constants are equal
+    /// today and are kept apart on purpose (FR-012).
+    const fn batched(total: usize, index: usize, segment: usize) -> Self {
         assert!(
             total <= 256,
             "a ledger block has at most 256 fields (the index is a byte)"
@@ -602,16 +697,16 @@ impl FieldPath {
         let mut depth = 0usize;
         let mut items = total;
         let mut at = index;
-        while items > SEGMENT {
-            let r = items % SEGMENT;
+        while items > segment {
+            let r = items % segment;
             let (group, pos) = if r != 0 {
                 if at < r {
                     (0, at)
                 } else {
-                    (1 + (at - r) / SEGMENT, (at - r) % SEGMENT)
+                    (1 + (at - r) / segment, (at - r) % segment)
                 }
             } else {
-                (at / SEGMENT, at % SEGMENT)
+                (at / segment, at % segment)
             };
             assert!(
                 depth < MAX_FIELD_PATH,
@@ -619,7 +714,7 @@ impl FieldPath {
             );
             rev[depth] = pos as u8;
             depth += 1;
-            items = items / SEGMENT + if r != 0 { 1 } else { 0 };
+            items = items / segment + if r != 0 { 1 } else { 0 };
             at = group;
         }
         rev[depth] = at as u8;
@@ -639,6 +734,153 @@ impl FieldPath {
 
 /// compactc's `maximum-ledger-segment-length` (langs.ss:851).
 const SEGMENT: usize = 15;
+
+/// The segment width of a HEADED block's body — FROZEN at fifteen as its
+/// own rule (notes/ledger-header.org, FR-012), not as a mirror of
+/// [`SEGMENT`]: compactc's constant carries a FIXME to take the ledger's
+/// sixteen (langs.ss:850), and if it ever does, default blocks follow
+/// compactc while a headed contract's layout must not move. Fifteen is
+/// also what makes the header fit: `1 + 15` root entries is the ledger's
+/// Array bound. Pinned by `the_headed_segment_is_frozen_at_fifteen`.
+const HEADED_SEGMENT: usize = 15;
+
+/// The ledger's Array bound (onchain-state `state.rs`, `arr.len() > 16`
+/// is an error): a root holds at most sixteen entries.
+const MAX_ROOT_ENTRIES: usize = 16;
+
+/// HOW A BLOCK'S BODY FIELDS ARE PLACED: the body's flat field count and
+/// the root offset — `0` for compactc's layout, `1` when a standard (a
+/// [`Placement::root_header`] slot) claims `root[0]`.
+///
+/// `#[derive(Ledger)]` computes one per block ([`Self::of_block`]) and
+/// hands it to every slot's `at_layout`; a group slot passes it on to its
+/// members unchanged, so a whole block is laid out by one value. `total`
+/// counts BODY fields only: a standard's `WIDTH` is zero, so the derive's
+/// width sums leave it out without being told.
+///
+/// Built only by its constructors, so the offset is `0` or `1` by
+/// construction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockLayout {
+    total: usize,
+    root_offset: u8,
+}
+
+impl BlockLayout {
+    /// compactc's layout of a block of `total` fields — every path is
+    /// [`FieldPath::in_block`]'s. What `at_block(total, …)` means.
+    pub const fn compactc(total: usize) -> Self {
+        BlockLayout {
+            total,
+            root_offset: 0,
+        }
+    }
+
+    /// A block whose `root[0]` is a standard's, with `total` body fields
+    /// laid out after it: [`HEADED_SEGMENT`]-wide segmentation, remainder
+    /// first, every path's first element `+ 1` (see
+    /// [`FieldPath::in_layout`]).
+    pub const fn headed(total: usize) -> Self {
+        BlockLayout {
+            total,
+            root_offset: 1,
+        }
+    }
+
+    /// The layout `#[derive(Ledger)]` gives a block of `total` body fields
+    /// carrying `standards` standards (from [`standards`]): compactc's
+    /// with none, headed with one; E0080 above one.
+    pub const fn of_block(total: usize, standards: usize) -> Self {
+        assert!(standards <= 1, "{}", ONE_STANDARD);
+        if standards == 0 {
+            BlockLayout::compactc(total)
+        } else {
+            BlockLayout::headed(total)
+        }
+    }
+
+    /// The body's flat field count.
+    pub const fn total(&self) -> usize {
+        self.total
+    }
+
+    /// Whether a standard holds `root[0]`.
+    pub const fn is_headed(&self) -> bool {
+        self.root_offset != 0
+    }
+}
+
+/// WHERE A SLOT SITS in its block: in the body ([`Placement::BODY`], every
+/// slot type but a standard), or at `root[0]` ahead of the body — a
+/// standard's header ([`Placement::root_header`], what
+/// `#[derive(LedgerHeader)]` emits).
+///
+/// The kind is private, so the only way to say "root header" is
+/// `Placement::root_header::<S>()`, which names a [`LedgerHeader`] and
+/// checks its magic: a type cannot claim `root[0]` without a standard's
+/// non-zero `MAGIC` behind it, however its `LedgerWidth` is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placement {
+    root_header: bool,
+}
+
+impl Placement {
+    /// Laid out from its flat index by the block's segmentation — every
+    /// slot type's placement but a standard's ([`LedgerWidth::PLACEMENT`]'s
+    /// default).
+    pub const BODY: Placement = Placement { root_header: false };
+
+    /// `root[0]`: the standard `S`, at most one per block. E0080 when
+    /// `S::MAGIC` is all zero bytes ([`super::header::assert_magic`]'s
+    /// message), and E0277 when `S` names no magic at all. What
+    /// `#[derive(LedgerHeader)]` emits as `PLACEMENT`
+    /// (`Placement::root_header::<Self>()`).
+    pub const fn root_header<S: LedgerHeader>() -> Placement {
+        const { assert_magic(&S::MAGIC) };
+        Placement { root_header: true }
+    }
+
+    /// Whether this is a standard's placement at `root[0]`.
+    pub const fn is_root_header(&self) -> bool {
+        self.root_header
+    }
+}
+
+/// The rule [`standards`] and [`BlockLayout::of_block`] enforce, in the
+/// words E0080 shows.
+const ONE_STANDARD: &str = "one standard per ledger block: two fields of this \
+     block are standards (`LedgerWidth::PLACEMENT` is `Placement::root_header`), \
+     and a standard claims root[0], of which a block has one. The same standard \
+     declared twice is the same collision. Merge them into one standard \
+     type, or drop one.";
+
+/// How many of a block's slots are standards — `#[derive(Ledger)]`'s
+/// `__HEADERS`, over every field's `LedgerWidth::PLACEMENT` and `WIDTH` in
+/// declaration order. E0080 when it is more than one, naming the rule, and
+/// when a standard's `WIDTH` is not zero (a standard takes no body field:
+/// the body is laid out as if it were absent).
+pub const fn standards(placements: &[Placement], widths: &[usize]) -> usize {
+    assert!(
+        placements.len() == widths.len(),
+        "standards: one placement and one width per field"
+    );
+    let mut n = 0;
+    let mut i = 0;
+    while i < placements.len() {
+        if placements[i].is_root_header() {
+            assert!(
+                widths[i] == 0,
+                "a standard occupies no body field: a slot whose `LedgerWidth::PLACEMENT` is \
+                 `Placement::root_header` must say `WIDTH = 0`, or the body would skip an index \
+                 for it. `#[derive(LedgerHeader)]` writes both"
+            );
+            n += 1;
+        }
+        i += 1;
+    }
+    assert!(n <= 1, "{}", ONE_STANDARD);
+    n
+}
 
 /// How many wires a stored `T` reads back as — one per FAB limb of its
 /// atoms. `#[derive(LedgerRepr)]` splits a composite read with it.
@@ -694,9 +936,10 @@ pub fn repr_limbs<T: LedgerRepr>() -> usize {
 /// Every slot in this module is one field. A slot that is a GROUP of fields
 /// (`signet_flow::Pending`, whose request map and environment map are two
 /// consecutive fields) says so here, and `#[derive(Ledger)]` lays the block
-/// out from these widths: `Self::at_block(total, start)` on each slot type
-/// takes the block's field count and the slot's first flat index, and
-/// [`FieldPath::in_block`] does the segmentation. Nothing is written by
+/// out from these widths: `Self::at_layout(layout, start)` on each slot type
+/// takes the block's [`BlockLayout`] and the slot's first flat index, and
+/// [`FieldPath::in_layout`] does the segmentation (`at_block(total, start)`
+/// is the same call at [`BlockLayout::compactc`]). Nothing is written by
 /// hand — a slot cannot be given the wrong width because the width is the
 /// type's.
 ///
@@ -704,6 +947,22 @@ pub fn repr_limbs<T: LedgerRepr>() -> usize {
 /// expects an MPC response declares the kind it settles under, and the
 /// derive asserts (at compile time, E0080) that no two slots of one block
 /// claim the same kind — the MPC's kind byte would be ambiguous otherwise.
+///
+/// `PLACEMENT` is the same trick for WHERE: a standard
+/// (`#[derive(LedgerHeader)]`) says [`Placement::root_header`] and a
+/// `WIDTH` of zero, so the block's body sums leave it out and the derive
+/// gives the block a headed layout — whichever field the standard is
+/// declared as.
+///
+/// A GROUP SLOT MUST NOT CONTAIN A STANDARD. The derive sees a block's own
+/// fields' placements only, so a standard built inside a hand-written group
+/// slot (its `at_layout` calling the standard's) is invisible to the
+/// one-standard rule at compile time. In a block without a standard its
+/// `at_layout` does not compile (a standard needs a headed layout, E0080);
+/// in a headed block it would be a second owner of `root[0]`, and the
+/// block's `initial_state()` refuses it at run time with the rule's name
+/// ("one standard per ledger block"). Declare a standard as a field of the
+/// contract's block instead.
 pub trait LedgerWidth {
     /// Consecutive ledger fields this slot occupies.
     const WIDTH: usize = 1;
@@ -714,6 +973,12 @@ pub trait LedgerWidth {
     /// lives; [`assert_distinct_kinds`] is what stops two slots of one block
     /// claiming the same one.
     const KINDS: &'static [u8] = &[];
+    /// Where the slot sits: the body (every slot but a standard) or
+    /// `root[0]`. Set by `#[derive(LedgerHeader)]` to
+    /// `Placement::root_header::<Self>()`, which checks the standard's magic;
+    /// the derive also checks its fields, and `#[derive(Ledger)]` its width
+    /// ([`standards`]).
+    const PLACEMENT: Placement = Placement::BODY;
 }
 
 /// `#[derive(Ledger)]`'s kind-uniqueness check: E0080 when two slots of a
@@ -746,20 +1011,31 @@ pub const fn assert_distinct_kinds(kinds: &[&[u8]]) {
     }
 }
 
-/// `at_block` and a one-field [`LedgerWidth`] for each slot type: the
-/// declared-form constructor `#[derive(Ledger)]` calls.
+/// `at_layout`, `at_block` and a one-field [`LedgerWidth`] for each slot
+/// type: the declared-form constructors `#[derive(Ledger)]` calls. Also
+/// the sealed [`super::header::HeaderField`] marker: these eight are the
+/// slot types a standard may own besides its magic.
 macro_rules! one_field_slot {
     ($( [$($gen:tt)*] $ty:ty ),* $(,)?) => {$(
         impl<$($gen)*> $ty {
+            /// The slot at flat BODY field `index` under `layout`
+            /// ([`FieldPath::in_layout`]) — what `#[derive(Ledger)]` emits.
+            pub const fn at_layout(layout: BlockLayout, index: usize) -> Self {
+                Self::at_path(FieldPath::in_layout(layout, index).as_slice())
+            }
+
             /// The slot at flat field `index` of a block of `total` fields,
             /// its path segmented as compactc segments it
             /// ([`FieldPath::in_block`]).
             pub const fn at_block(total: usize, index: usize) -> Self {
-                Self::at_path(FieldPath::in_block(total, index).as_slice())
+                Self::at_layout(BlockLayout::compactc(total), index)
             }
         }
 
         impl<$($gen)*> LedgerWidth for $ty {}
+
+        impl<$($gen)*> super::header::sealed::HeaderField for $ty {}
+        impl<$($gen)*> super::header::HeaderField for $ty {}
     )*};
 }
 
@@ -1231,6 +1507,12 @@ impl<T> LedgerSet<T> {
         }
     }
 
+    /// The declared slot's path — what the deploy builder's
+    /// [`super::StateBuilder::set`] takes to replace its initial value.
+    pub const fn field_path(&self) -> FieldPath {
+        self.path
+    }
+
     /// The ledger field index.
     pub const fn index(&self) -> u8 {
         self.path.index()
@@ -1361,6 +1643,12 @@ impl<T> LedgerList<T> {
             path: FieldPath::of(path),
             _t: PhantomData,
         }
+    }
+
+    /// The declared slot's path — what the deploy builder's
+    /// [`super::StateBuilder::set`] takes to replace its initial value.
+    pub const fn field_path(&self) -> FieldPath {
+        self.path
     }
 
     /// The ledger field index.
@@ -1539,6 +1827,12 @@ impl<const DEPTH: u8, T> LedgerMerkleTree<DEPTH, T> {
         }
     }
 
+    /// The declared slot's path — what the deploy builder's
+    /// [`super::StateBuilder::set`] takes to replace its initial value.
+    pub const fn field_path(&self) -> FieldPath {
+        self.path
+    }
+
     /// The ledger field index.
     pub const fn index(&self) -> u8 {
         self.path.index()
@@ -1668,6 +1962,12 @@ impl<const DEPTH: u8, T> LedgerHistoricMerkleTree<DEPTH, T> {
             path: FieldPath::of(path),
             _t: PhantomData,
         }
+    }
+
+    /// The declared slot's path — what the deploy builder's
+    /// [`super::StateBuilder::set`] takes to replace its initial value.
+    pub const fn field_path(&self) -> FieldPath {
+        self.path
     }
 
     /// The ledger field index.
@@ -1846,6 +2146,12 @@ impl<T> LedgerCell<T> {
         }
     }
 
+    /// The declared slot's path — what the deploy builder's
+    /// [`super::StateBuilder::set`] takes to replace its initial value.
+    pub const fn field_path(&self) -> FieldPath {
+        self.path
+    }
+
     /// The ledger field index.
     pub const fn index(&self) -> u8 {
         self.path.index()
@@ -1890,6 +2196,12 @@ impl LedgerCounter {
         LedgerCounter {
             path: FieldPath::of(path),
         }
+    }
+
+    /// The declared slot's path — what the deploy builder's
+    /// [`super::StateBuilder::set`] takes to replace its initial value.
+    pub const fn field_path(&self) -> FieldPath {
+        self.path
     }
 
     /// The ledger field index.
@@ -1992,6 +2304,72 @@ impl LedgerField {
     }
 }
 
+// ---- the deploy state (notes/ledger-header.org) -----------------------------------
+//
+// Each declared slot's initial value, at its own path: the constants the
+// slot's `resetToDefault` pushes (the `empty_*` values above), and a Cell's
+// type default ([`LedgerRepr::default_stored`]) — what compactc's generated
+// `initialState` leaves in each field. `super::state` assembles the tree.
+
+/// `x: T` — `T`'s default, stored (a `Bytes<32>` of zeros is the empty atom).
+impl<T: LedgerRepr> InitialState for LedgerCell<T> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, stored_cell(T::atoms(), T::default_stored()));
+    }
+}
+
+/// `n: Counter` — `cell 0u64`.
+impl InitialState for LedgerCounter {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, empty_counter());
+    }
+}
+
+/// `m: Map<K, V>` — the empty map.
+impl<K, V> InitialState for LedgerMap<K, V> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, empty_map());
+    }
+}
+
+/// `s: Set<T>` — the empty map, as a `Map`'s.
+impl<T> InitialState for LedgerSet<T> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, empty_map());
+    }
+}
+
+/// `l: List<T>` — `[null, null, cell 0u64]`.
+impl<T> InitialState for LedgerList<T> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, empty_list());
+    }
+}
+
+/// `t: MerkleTree<DEPTH, T>` — `[blank tree, cell 0u64]`.
+impl<const DEPTH: u8, T> InitialState for LedgerMerkleTree<DEPTH, T> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, empty_merkle_tree_value(DEPTH));
+    }
+}
+
+/// `t: HistoricMerkleTree<DEPTH, T>` — what its `resetToDefault` LEAVES: the
+/// declared value with the blank root already in the history.
+impl<const DEPTH: u8, T> InitialState for LedgerHistoricMerkleTree<DEPTH, T> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, historic_merkle_tree_reset_value(DEPTH));
+    }
+}
+
+/// An untyped field has no default this layer could know: it is declared
+/// Null, which keeps its place in the skeleton, and the deployer
+/// [`StateBuilder::set`]s whatever a Compact constructor would write.
+impl InitialState for LedgerField {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, StateValue::Null);
+    }
+}
+
 #[cfg(test)]
 mod block_layout_tests {
     use super::*;
@@ -2069,5 +2447,147 @@ mod block_layout_tests {
     #[test]
     fn distinct_kinds_accepts_distinct_and_empty() {
         const _: () = assert_distinct_kinds(&[&[], &[0], &[1, 2], &[]]);
+    }
+
+    /// ZERO MOVEMENT, at the source: compactc's layout through the new
+    /// entry point is `in_block`, for every block size and field.
+    #[test]
+    fn a_compactc_layout_is_in_block_for_every_block_size() {
+        for total in 1..=256usize {
+            for index in 0..total {
+                assert_eq!(
+                    FieldPath::in_layout(BlockLayout::compactc(total), index).as_slice(),
+                    FieldPath::in_block(total, index).as_slice(),
+                    "block of {total}, field {index}"
+                );
+            }
+        }
+    }
+
+    /// The number of root entries compactc's `batch` gives `n` fields —
+    /// the research's `R(n)` (n for n <= 15, ceil(n/15) to 225, 2 above).
+    fn root_entries(n: usize) -> usize {
+        match n {
+            0..=15 => n,
+            16..=225 => n.div_ceil(15),
+            _ => 2,
+        }
+    }
+
+    /// T1 (SC-001, FR-001/FR-002), exhaustive: for every body count
+    /// 0..=256, the headed path of every body field is compactc's path for
+    /// the same body with the first element + 1; paths are unique; depth is
+    /// compactc's; no body path touches `root[0]`; and the root holds
+    /// `1 + R(n) <= 16` entries.
+    #[test]
+    fn a_headed_body_is_batch_moved_one_root_slot_along_for_every_body_size() {
+        for n in 0..=256usize {
+            let reference = field_paths(n);
+            let mut seen = std::collections::BTreeSet::new();
+            let mut roots = std::collections::BTreeSet::from([0u8]);
+            for (k, compactc) in reference.iter().enumerate() {
+                let headed = FieldPath::in_layout(BlockLayout::headed(n), k);
+                let mut expected = compactc.clone();
+                expected[0] += 1;
+                assert_eq!(
+                    headed.as_slice(),
+                    expected.as_slice(),
+                    "body of {n}, field {k}"
+                );
+                assert_eq!(
+                    headed.depth() as usize,
+                    compactc.len(),
+                    "depth, body of {n}, field {k}"
+                );
+                assert_ne!(headed.as_slice()[0], 0, "root[0] is the standard's");
+                assert!(
+                    seen.insert(headed.as_slice().to_vec()),
+                    "duplicate path, body of {n}, field {k}"
+                );
+                roots.insert(headed.as_slice()[0]);
+            }
+            assert_eq!(
+                roots.len(),
+                1 + root_entries(n),
+                "root entries, body of {n}"
+            );
+            assert!(roots.len() <= MAX_ROOT_ENTRIES, "body of {n}");
+            // Dense: the root indices are exactly 0..1 + R(n).
+            assert_eq!(
+                roots.iter().copied().max().map(usize::from),
+                Some(root_entries(n)),
+                "body of {n}"
+            );
+        }
+    }
+
+    /// FR-012: the headed rule is its OWN frozen constant, and the paths it
+    /// gives are pinned as literals — a change to compactc's `SEGMENT`
+    /// (its FIXME wants sixteen) cannot move a headed contract without
+    /// failing here.
+    #[test]
+    fn the_headed_segment_is_frozen_at_fifteen() {
+        assert_eq!(HEADED_SEGMENT, 15);
+        let h = |n, k| FieldPath::in_layout(BlockLayout::headed(n), k);
+        // Flat to fifteen: [1..=15], the 16-entry root at fifteen.
+        assert_eq!(h(1, 0).as_slice(), &[1]);
+        assert_eq!(h(15, 14).as_slice(), &[15]);
+        // Sixteen: the remainder segment leads, one level deep.
+        assert_eq!(h(16, 0).as_slice(), &[1, 0]);
+        assert_eq!(h(16, 1).as_slice(), &[2, 0]);
+        assert_eq!(h(16, 15).as_slice(), &[2, 14]);
+        // 225 is fifteen full segments: [1..=15, 0..15).
+        assert_eq!(h(225, 0).as_slice(), &[1, 0]);
+        assert_eq!(h(225, 224).as_slice(), &[15, 14]);
+        // 226: three levels, as compactc.
+        assert_eq!(h(226, 0).as_slice(), &[1, 0, 0]);
+        assert_eq!(h(226, 225).as_slice(), &[2, 14, 14]);
+        assert_eq!(h(256, 255).as_slice(), &[2, 14, 14]);
+    }
+
+    /// `of_block` is what the derive calls: none → compactc's, one →
+    /// headed.
+    #[test]
+    fn of_block_picks_the_layout_from_the_standard_count() {
+        assert_eq!(BlockLayout::of_block(7, 0), BlockLayout::compactc(7));
+        assert_eq!(BlockLayout::of_block(7, 1), BlockLayout::headed(7));
+        assert!(!BlockLayout::compactc(7).is_headed());
+        assert!(BlockLayout::headed(0).is_headed());
+        assert_eq!(BlockLayout::headed(9).total(), 9);
+        const BODY: Placement = Placement::BODY;
+        const ROOT: Placement = <Std as LedgerWidth>::PLACEMENT;
+        const _: usize = standards(&[BODY, ROOT, BODY], &[1, 0, 1]);
+        assert_eq!(standards(&[BODY, ROOT], &[1, 0]), 1);
+        assert_eq!(standards(&[BODY, BODY], &[1, 3]), 0);
+        assert_eq!(standards(&[], &[]), 0);
+        assert!(ROOT.is_root_header() && !BODY.is_root_header());
+    }
+
+    /// A standard written by hand: `root_header` is the one way to say
+    /// "root header", and it names the standard (its magic is checked).
+    struct Std;
+    impl LedgerWidth for Std {
+        const WIDTH: usize = 0;
+        const PLACEMENT: Placement = Placement::root_header::<Std>();
+    }
+    impl LedgerHeader for Std {
+        const MAGIC: [u8; 32] = super::super::header::pad32(b"std");
+    }
+
+    /// A standard's WIDTH must be zero: `standards` refuses one that would
+    /// take a body index (E0080 in the derive's `const` items).
+    #[test]
+    #[should_panic(expected = "a standard occupies no body field")]
+    fn a_standard_of_nonzero_width_is_refused() {
+        let widths = std::hint::black_box([1usize]);
+        standards(&[<Std as LedgerWidth>::PLACEMENT], &widths);
+    }
+
+    /// Two standards are refused, named.
+    #[test]
+    #[should_panic(expected = "one standard per ledger block")]
+    fn two_standards_are_refused() {
+        let root = <Std as LedgerWidth>::PLACEMENT;
+        standards(std::hint::black_box(&[root, root]), &[0, 0]);
     }
 }

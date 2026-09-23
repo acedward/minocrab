@@ -29,6 +29,8 @@
 //! - [`macro@CircuitBorsh`] — the same, plus canonical Borsh over the
 //!   fixed-width subset
 //! - [`macro@Ledger`] — the ledger block's declaration-order slot indices
+//! - [`macro@LedgerHeader`] — a standard: the header a block's `root[0]`
+//!   holds, wherever the block declares it
 
 use proc_macro::TokenStream;
 
@@ -38,6 +40,7 @@ mod circuit_arg;
 mod circuit_borsh;
 mod interface;
 mod ledger;
+mod ledger_header;
 mod ledger_repr;
 
 /// Derive [`CircuitArg`] (one nested argument) and `CircuitArgs` (a whole
@@ -162,6 +165,23 @@ pub fn derive_ledger_repr(input: TokenStream) -> TokenStream {
 pub fn derive_ledger(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
     ledger::expand(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Derive a STANDARD's slot side: `LedgerWidth` with `WIDTH = 0` and
+/// `PLACEMENT = Placement::root_header::<Self>()`, `at_layout`, `magic()`,
+/// the deploy state (`InitialState`: the magic, then the fields), and the
+/// compile-time
+/// checks (a non-zero magic; at most 15 named fields, each a single-field
+/// std slot). The magic itself is the hand-written
+/// `impl LedgerHeader for T { const MAGIC: [u8; 32] = pad32(b"…"); }`.
+/// A unit struct is magic-only (`[0]`); named fields follow the magic in
+/// the header Array (`[0, i + 1]`).
+#[proc_macro_derive(LedgerHeader)]
+pub fn derive_ledger_header(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    ledger_header::expand(input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

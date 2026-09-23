@@ -41,8 +41,9 @@ use minocrab::{Private, Public};
 use minocrab_ledger::{XcallCommitment, XcallEntryPointHash};
 use minocrab_std::v3::blind::{Add, Max};
 use minocrab_std::v3::{
-    label, own_public_key, repr_limbs, Assumed, Disclose, DisclosureLabel, FieldPath, LedgerRepr, ProofWires,
-    LedgerWidth, Stream, StreamSpec, Uint, ZswapCoinPublicKey,
+    label, own_public_key, repr_limbs, Assumed, BlockLayout, Disclose, DisclosureLabel, FieldPath,
+    InitialState, LedgerRepr, LedgerWidth, ProofWires, StateBuilder, Stream, StreamSpec, Uint,
+    ZswapCoinPublicKey,
 };
 use signet_signer_interface::RequestId;
 
@@ -116,6 +117,15 @@ impl<Env: LedgerRepr> LedgerRepr for Outstanding<Env> {
         atoms
     }
 
+    /// The components' defaults in `atoms` order — so an `Env` whose
+    /// default is not zero (a curve point's identity) keeps it in the
+    /// deploy state.
+    fn default_stored() -> Vec<Vec<u8>> {
+        let mut stored = Env::default_stored();
+        stored.extend(<Uint<64, Public> as LedgerRepr>::default_stored());
+        stored
+    }
+
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
         LedgerRepr::push_limbs(&self.env, c, limbs);
         LedgerRepr::push_limbs(&self.seen, c, limbs);
@@ -172,14 +182,23 @@ pub struct Outbox<F: Filing, Env: LedgerRepr, const WORDS: usize> {
 }
 
 impl<F: Filing, Env: LedgerRepr, const WORDS: usize> Outbox<F, Env, WORDS> {
-    /// The slot's seven fields from flat index `start`, against the block's
-    /// `Signet` at `signet_start` — what `#[derive(Ledger)]` emits for a
-    /// field whose type is spelled `Outbox`.
-    pub const fn at_block_with_signet(total: usize, start: usize, signet_start: usize) -> Self {
+    /// The slot's seven fields from flat body index `start`, against the
+    /// block's `Signet` at `signet_start`, all under `layout` — what
+    /// `#[derive(Ledger)]` emits for a field whose type is spelled `Outbox`.
+    pub const fn at_layout_with_signet(
+        layout: BlockLayout,
+        start: usize,
+        signet_start: usize,
+    ) -> Self {
         Outbox {
-            pending: Pending::at_block_with_signet(total, start, signet_start),
-            stream: Stream::at_block(total, start + 2),
+            pending: Pending::at_layout_with_signet(layout, start, signet_start),
+            stream: Stream::at_layout(layout, start + 2),
         }
+    }
+
+    /// The same at compactc's layout of a block of `total` fields.
+    pub const fn at_block_with_signet(total: usize, start: usize, signet_start: usize) -> Self {
+        Self::at_layout_with_signet(BlockLayout::compactc(total), start, signet_start)
     }
 
     /// The record map's ledger path: the notification's `depth ‖ path`.
@@ -198,6 +217,15 @@ impl<F: Filing, Env: LedgerRepr, const WORDS: usize> Outbox<F, Env, WORDS> {
 impl<F: Filing, Env: LedgerRepr, const WORDS: usize> LedgerWidth for Outbox<F, Env, WORDS> {
     const WIDTH: usize = 2 + <Stream<OutboxSpec<Env, WORDS>> as LedgerWidth>::WIDTH;
     const KINDS: &'static [u8] = &[F::KIND];
+}
+
+/// The `Pending`'s two maps, then the stream's five fields — all empty, the
+/// nonce and last-seen cells at zero.
+impl<F: Filing, Env: LedgerRepr, const WORDS: usize> InitialState for Outbox<F, Env, WORDS> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        self.pending.contribute(state);
+        self.stream.contribute(state);
+    }
 }
 
 impl<F: Filing, Env: LedgerRepr + ProofWires, const WORDS: usize> Outbox<F, Env, WORDS>

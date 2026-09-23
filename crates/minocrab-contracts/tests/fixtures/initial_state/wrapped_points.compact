@@ -1,0 +1,57 @@
+pragma language_version >= 0.25;
+
+// Project 00002 fixture (fork work) — A CURVE POINT INSIDE A RECORD, the
+// oracle of the deploy-state builder's composite defaults
+// (notes/ledger-header.org; audit R2).
+//
+//   compactc --skip-zk --feature-zkir-v3 wrapped_points.compact out   # compactc 0.34.0
+//
+// then run the generated `initialState` in node (project 00002's JS oracle;
+// `wrapped_points.state.hex` beside this file is its output, with
+// provenance). compactc's JS defaults a struct member by member, and a
+// curve point to its IDENTITY, so each Cell below starts with the point's
+// identity inside the record. Each struct has the atom sequence of one of
+// minocrab's generic `evm_flow` wrappers with a point for its type
+// parameter; minocrab's `initial_state()` of the equivalent non-headed
+// `#[derive(Ledger)]` block (`WrappedPoints` in tests/ledger_deploy.rs)
+// must serialize to the same bytes. Only the source and the state are
+// committed; `out/` is not needed by any test.
+//
+// No constructor and no circuits: the state is the skeleton plus each
+// field's `resetToDefault`, nothing else.
+
+import CompactStandardLibrary;
+
+// `Owned<Secp256k1Point>`: the owner commitment (`Bytes<32>`), then `E`.
+struct OwnedSecp {
+  owner: Bytes<32>;
+  inner: Secp256k1Point;
+}
+
+// `Outstanding<JubjubPoint>`: `Env`, then the last seen (`Uint<64>`).
+struct OutstandingJub {
+  env: JubjubPoint;
+  seen: Uint<64>;
+}
+
+// `HandleOwned<JubjubPoint>`: the handle (a `Field`), the owner commitment,
+// then `E`.
+struct HandleOwnedJub {
+  handle: Field;
+  owner: Bytes<32>;
+  inner: JubjubPoint;
+}
+
+// `QueueEntry<Secp256k1Point, 1>`: the one-word pre-record (`Bytes<20>`,
+// `Uint<8>`, one `Bytes<32>`), then `Env`.
+struct QueueEntrySecp {
+  to: Bytes<20>;
+  keyVersion: Uint<8>;
+  word: Bytes<32>;
+  env: Secp256k1Point;
+}
+
+export ledger owned: OwnedSecp;              // 0
+export ledger outstanding: OutstandingJub;   // 1
+export ledger handleOwned: HandleOwnedJub;   // 2
+export ledger queued: QueueEntrySecp;        // 3

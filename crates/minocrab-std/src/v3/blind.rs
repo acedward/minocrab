@@ -60,7 +60,8 @@ use minocrab::Public;
 
 use super::assumed::Assumed;
 use super::hook::{Hook, Lowered};
-use super::ledger::{LedgerCell, LedgerMap, LedgerRepr};
+use super::ledger::{BlockLayout, LedgerCell, LedgerMap, LedgerRepr};
+use super::state::{InitialState, StateBuilder};
 use super::{Bool, Uint};
 
 /// A step the LEDGER executes: an accumulator laid out as one or more cells,
@@ -75,16 +76,27 @@ pub trait Primitive<S>: Sized {
     const ACC_FIELDS: usize;
     /// Ledger fields the snapshot maps occupy (one per component).
     const SNAPSHOT_FIELDS: usize;
-    /// The accumulator handle(s).
-    type Acc;
-    /// The per-key snapshot map(s), keyed by `K`.
-    type Snapshot<K>;
+    /// The accumulator handle(s). Its deploy-time state is its cells'
+    /// defaults ([`InitialState`], notes/ledger-header.org).
+    type Acc: InitialState;
+    /// The per-key snapshot map(s), keyed by `K` — empty at deploy.
+    type Snapshot<K>: InitialState;
+
+    /// The accumulator's handles from flat body field `start` under
+    /// `layout` — what a nested ledger struct (`Stream`) calls.
+    fn acc_at_layout(layout: BlockLayout, start: usize) -> Self::Acc;
+    /// The snapshot maps' handles, likewise.
+    fn snapshot_at_layout<K>(layout: BlockLayout, start: usize) -> Self::Snapshot<K>;
 
     /// The accumulator's handles from flat field `start` of a block of
-    /// `total` fields — what a nested ledger struct's constructor calls.
-    fn acc_at_block(total: usize, start: usize) -> Self::Acc;
+    /// `total` fields, at compactc's layout.
+    fn acc_at_block(total: usize, start: usize) -> Self::Acc {
+        Self::acc_at_layout(BlockLayout::compactc(total), start)
+    }
     /// The snapshot maps' handles, likewise.
-    fn snapshot_at_block<K>(total: usize, start: usize) -> Self::Snapshot<K>;
+    fn snapshot_at_block<K>(total: usize, start: usize) -> Self::Snapshot<K> {
+        Self::snapshot_at_layout::<K>(BlockLayout::compactc(total), start)
+    }
 
     /// `acc ⊕= delta` appended to `hook` (M42: the blind ops live on
     /// [`Hook`] and nowhere inline): no public input, nothing to go stale.
@@ -157,12 +169,12 @@ macro_rules! one_cell {
         type Acc = LedgerCell<$S>;
         type Snapshot<K> = LedgerMap<K, $S>;
 
-        fn acc_at_block(total: usize, start: usize) -> Self::Acc {
-            LedgerCell::at_block(total, start)
+        fn acc_at_layout(layout: BlockLayout, start: usize) -> Self::Acc {
+            LedgerCell::at_layout(layout, start)
         }
 
-        fn snapshot_at_block<K>(total: usize, start: usize) -> Self::Snapshot<K> {
-            LedgerMap::at_block(total, start)
+        fn snapshot_at_layout<K>(layout: BlockLayout, start: usize) -> Self::Snapshot<K> {
+            LedgerMap::at_layout(layout, start)
         }
 
         fn snapshot<K: LedgerRepr>(
@@ -305,21 +317,29 @@ pub struct FirstAcc<S> {
     pub written: LedgerCell<Bool<Public>>,
 }
 
+/// Both cells at their defaults: the value unset, `written` false.
+impl<S: LedgerRepr> InitialState for FirstAcc<S> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        self.value.contribute(state);
+        self.written.contribute(state);
+    }
+}
+
 impl<S: LedgerRepr> Primitive<S> for First {
     const ACC_FIELDS: usize = 2;
     const SNAPSHOT_FIELDS: usize = 1;
     type Acc = FirstAcc<S>;
     type Snapshot<K> = LedgerMap<K, S>;
 
-    fn acc_at_block(total: usize, start: usize) -> Self::Acc {
+    fn acc_at_layout(layout: BlockLayout, start: usize) -> Self::Acc {
         FirstAcc {
-            value: LedgerCell::at_block(total, start),
-            written: LedgerCell::at_block(total, start + 1),
+            value: LedgerCell::at_layout(layout, start),
+            written: LedgerCell::at_layout(layout, start + 1),
         }
     }
 
-    fn snapshot_at_block<K>(total: usize, start: usize) -> Self::Snapshot<K> {
-        LedgerMap::at_block(total, start)
+    fn snapshot_at_layout<K>(layout: BlockLayout, start: usize) -> Self::Snapshot<K> {
+        LedgerMap::at_layout(layout, start)
     }
 
     /// `if_unset(written, |h| h.write(value, Δ).write(written, true))` —
@@ -360,20 +380,20 @@ macro_rules! tuple_steps {
             type Snapshot<K> = ($($p::Snapshot<K>,)+);
 
             #[allow(unused_assignments)]
-            fn acc_at_block(total: usize, start: usize) -> Self::Acc {
+            fn acc_at_layout(layout: BlockLayout, start: usize) -> Self::Acc {
                 let mut at = start;
                 ($({
-                    let acc = $p::acc_at_block(total, at);
+                    let acc = $p::acc_at_layout(layout, at);
                     at += $p::ACC_FIELDS;
                     acc
                 },)+)
             }
 
             #[allow(unused_assignments)]
-            fn snapshot_at_block<K>(total: usize, start: usize) -> Self::Snapshot<K> {
+            fn snapshot_at_layout<K>(layout: BlockLayout, start: usize) -> Self::Snapshot<K> {
                 let mut at = start;
                 ($({
-                    let snapshot = $p::snapshot_at_block::<K>(total, at);
+                    let snapshot = $p::snapshot_at_layout::<K>(layout, at);
                     at += $p::SNAPSHOT_FIELDS;
                     snapshot
                 },)+)

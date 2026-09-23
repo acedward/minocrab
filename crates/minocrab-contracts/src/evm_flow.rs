@@ -505,9 +505,9 @@ use minocrab::{Private, Public};
 use minocrab_std::v3::borsh::CircuitBorsh;
 use minocrab_std::v3::hash::{transient_hash_compact, upgrade_from_transient};
 use minocrab_std::v3::{
-    eq, is_true, label, not, own_public_key, repr_limbs, ArgPath, Bytes, CircuitAbi, CircuitArg,
-    Assumed, Disclose, DisclosureLabel, FieldPath, LedgerMap, LedgerRepr, LedgerWidth, Prim,
-    ProofWires, Uint, Vis3, ZswapCoinPublicKey, B32,
+    eq, is_true, label, not, own_public_key, repr_limbs, ArgPath, Assumed, BlockLayout, Bytes,
+    CircuitAbi, CircuitArg, Disclose, DisclosureLabel, FieldPath, InitialState, LedgerMap,
+    LedgerRepr, LedgerWidth, Prim, ProofWires, StateBuilder, Uint, Vis3, ZswapCoinPublicKey, B32,
 };
 use minocrab::v3::Val;
 use signet_signer_interface::{RequestId, Signature};
@@ -894,6 +894,11 @@ impl<T, Tag> LedgerRepr for Commit<T, Tag> {
         <B32<Public> as LedgerRepr>::atoms()
     }
 
+    /// The digest's default: a composite's default is its components'.
+    fn default_stored() -> Vec<Vec<u8>> {
+        <B32<Public> as LedgerRepr>::default_stored()
+    }
+
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
         LedgerRepr::push_limbs(&self.digest, c, limbs)
     }
@@ -937,6 +942,14 @@ impl<E: LedgerRepr> LedgerRepr for Owned<E> {
         atoms
     }
 
+    /// The components' defaults in `atoms` order — so an `E` whose default
+    /// is not zero (a curve point's identity) keeps it in the deploy state.
+    fn default_stored() -> Vec<Vec<u8>> {
+        let mut stored = <Commit<SecretKey<Private>, OwnerTag> as LedgerRepr>::default_stored();
+        stored.extend(E::default_stored());
+        stored
+    }
+
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
         LedgerRepr::push_limbs(&self.owner, c, limbs);
         LedgerRepr::push_limbs(&self.inner, c, limbs);
@@ -978,7 +991,7 @@ impl<E: LedgerRepr> LedgerRepr for Owned<E> {
 ///
 /// The `Signet` handle is built by `#[derive(Ledger)]`, which finds the
 /// block's one `Signet` field and threads its offset in
-/// ([`Self::at_block_with_signet`]). That is why `request`, `complete` and
+/// ([`Self::at_layout_with_signet`]). That is why `request`, `complete` and
 /// `refund` take no `&SELF.signet`.
 pub struct Pending<F: Filing, Env, const WORDS: usize = 2> {
     records: LedgerMap<RequestId<Public>, EventRecordV2<WORDS>>,
@@ -988,10 +1001,15 @@ pub struct Pending<F: Filing, Env, const WORDS: usize = 2> {
 }
 
 impl<F: Filing, Env, const WORDS: usize> Pending<F, Env, WORDS> {
-    /// The slot's two fields from flat index `start`, against the block's
-    /// `Signet` at `signet_start` — what `#[derive(Ledger)]` emits for a
-    /// field whose type is spelled `Pending`.
-    pub const fn at_block_with_signet(total: usize, start: usize, signet_start: usize) -> Self {
+    /// The slot's two fields from flat body index `start`, against the
+    /// block's `Signet` at `signet_start`, both under `layout` — what
+    /// `#[derive(Ledger)]` emits for a field whose type is spelled
+    /// `Pending`.
+    pub const fn at_layout_with_signet(
+        layout: BlockLayout,
+        start: usize,
+        signet_start: usize,
+    ) -> Self {
         const {
             assert!(
                 WORDS == <<Called<F> as EvmCall>::Args as AbiTuple>::WORDS,
@@ -1003,11 +1021,16 @@ impl<F: Filing, Env, const WORDS: usize> Pending<F, Env, WORDS> {
             )
         }
         Pending {
-            records: LedgerMap::at_block(total, start),
-            envs: LedgerMap::at_block(total, start + 1),
-            signet: Signet::at_block(total, signet_start),
+            records: LedgerMap::at_layout(layout, start),
+            envs: LedgerMap::at_layout(layout, start + 1),
+            signet: Signet::at_layout(layout, signet_start),
             _filing: PhantomData,
         }
+    }
+
+    /// The same at compactc's layout of a block of `total` fields.
+    pub const fn at_block_with_signet(total: usize, start: usize, signet_start: usize) -> Self {
+        Self::at_layout_with_signet(BlockLayout::compactc(total), start, signet_start)
     }
 
     /// The record map's ledger path: the notification's `depth ‖ path`.
@@ -1033,10 +1056,14 @@ pub struct Fired<F: Filing, const WORDS: usize = 2> {
 }
 
 impl<F: Filing, const WORDS: usize> Fired<F, WORDS> {
-    /// The slot's one field at flat index `start`, against the block's
-    /// `Signet` at `signet_start` — what `#[derive(Ledger)]` emits for a
-    /// field whose type is spelled `Fired`.
-    pub const fn at_block_with_signet(total: usize, start: usize, signet_start: usize) -> Self {
+    /// The slot's one field at flat body index `start`, against the
+    /// block's `Signet` at `signet_start`, both under `layout` — what
+    /// `#[derive(Ledger)]` emits for a field whose type is spelled `Fired`.
+    pub const fn at_layout_with_signet(
+        layout: BlockLayout,
+        start: usize,
+        signet_start: usize,
+    ) -> Self {
         const {
             assert!(
                 WORDS == <<Called<F> as EvmCall>::Args as AbiTuple>::WORDS,
@@ -1048,10 +1075,15 @@ impl<F: Filing, const WORDS: usize> Fired<F, WORDS> {
             )
         }
         Fired {
-            records: LedgerMap::at_block(total, start),
-            signet: Signet::at_block(total, signet_start),
+            records: LedgerMap::at_layout(layout, start),
+            signet: Signet::at_layout(layout, signet_start),
             _filing: PhantomData,
         }
+    }
+
+    /// The same at compactc's layout of a block of `total` fields.
+    pub const fn at_block_with_signet(total: usize, start: usize, signet_start: usize) -> Self {
+        Self::at_layout_with_signet(BlockLayout::compactc(total), start, signet_start)
     }
 
     /// The record map's ledger path: the notification's `depth ‖ path`.
@@ -1107,6 +1139,22 @@ impl<F: Filing, const WORDS: usize> LedgerWidth for Fired<F, WORDS> {
 impl<F: Filing, Env, const WORDS: usize> LedgerWidth for Pending<F, Env, WORDS> {
     const WIDTH: usize = 2;
     const KINDS: &'static [u8] = &[F::KIND];
+}
+
+/// Its two maps, empty. The `Signet` it reads is the block's own field,
+/// which contributes itself.
+impl<F: Filing, Env, const WORDS: usize> InitialState for Pending<F, Env, WORDS> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        self.records.contribute(state);
+        self.envs.contribute(state);
+    }
+}
+
+/// Its record map, empty; the `Signet` is the block's.
+impl<F: Filing, const WORDS: usize> InitialState for Fired<F, WORDS> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        self.records.contribute(state);
+    }
 }
 
 impl<F: Filing, Env: LedgerRepr, const WORDS: usize> Pending<F, Env, WORDS>
@@ -1630,6 +1678,16 @@ impl<const WORDS: usize> LedgerRepr for PreRecord<WORDS> {
         atoms
     }
 
+    /// The components' defaults in `atoms` order.
+    fn default_stored() -> Vec<Vec<u8>> {
+        let mut stored = <Bytes<20, Public> as LedgerRepr>::default_stored();
+        stored.extend(<Uint<8, Public> as LedgerRepr>::default_stored());
+        for _ in 0..WORDS {
+            stored.extend(<B32<Public> as LedgerRepr>::default_stored());
+        }
+        stored
+    }
+
     fn push_limbs(&self, _c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
         limbs.extend_from_slice(&self.0);
     }
@@ -1671,6 +1729,13 @@ impl<Env: LedgerRepr, const WORDS: usize> LedgerRepr for QueueEntry<Env, WORDS> 
         let mut atoms = <PreRecord<WORDS> as LedgerRepr>::atoms();
         atoms.extend(Env::atoms());
         atoms
+    }
+
+    /// The components' defaults in `atoms` order (see [`Owned`]'s).
+    fn default_stored() -> Vec<Vec<u8>> {
+        let mut stored = <PreRecord<WORDS> as LedgerRepr>::default_stored();
+        stored.extend(Env::default_stored());
+        stored
     }
 
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
@@ -1720,6 +1785,14 @@ impl<E: LedgerRepr> LedgerRepr for HandleOwned<E> {
         atoms.extend(<Commit<SecretKey<Private>, OwnerTag> as LedgerRepr>::atoms());
         atoms.extend(E::atoms());
         atoms
+    }
+
+    /// The components' defaults in `atoms` order (see [`Owned`]'s).
+    fn default_stored() -> Vec<Vec<u8>> {
+        let mut stored = <Handle<Public> as LedgerRepr>::default_stored();
+        stored.extend(<Commit<SecretKey<Private>, OwnerTag> as LedgerRepr>::default_stored());
+        stored.extend(E::default_stored());
+        stored
     }
 
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {

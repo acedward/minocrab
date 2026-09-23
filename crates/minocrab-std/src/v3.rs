@@ -17,6 +17,8 @@ use minocrab::{Alignment, AlignmentAtom, AlignmentSegment, Fr, Meet, Private, Pu
 /// expansion depends on nothing a user must import.
 #[doc(hidden)]
 pub mod __derive {
+    pub use super::header::{assert_headed, assert_header_fields, assert_magic, header_field};
+    pub use super::state::assert_magics;
     pub use super::{repr_limbs, LedgerRepr, ProofWires};
     pub use minocrab::v3::{Circuit3, FieldT, Val, Wire3};
     pub use minocrab::{AlignmentAtom, Public};
@@ -24,8 +26,11 @@ pub mod __derive {
 
 mod call;
 mod disclose;
+mod discriminator;
 mod entry;
+mod header;
 mod ledger;
+mod state;
 
 /// Blind accumulators (M40): the steps the ledger applies itself — `Add`,
 /// `Max`, `Min`, `And`, `Or`, `Last`, `First` and tuples of them — with a
@@ -75,14 +80,37 @@ pub use entry::{entry, entry_out, ArgPath, CircuitArg, CircuitArgs, CircuitOut};
 /// path a block of sixteen fields or more forces), [`KeyPath`] (the runtime
 /// path an `at_key` chain builds), and the sealed pair [`LedgerSlot`] /
 /// [`LedgerAdt`] that splits the value position into plain values and ADT
-/// handles.
+/// handles. A block's [`BlockLayout`] and each slot's [`Placement`] are
+/// what a standard's header at `root[0]` rides on (notes/ledger-header.org).
 pub use ledger::{
-    Fresh,
-    assert_distinct_kinds, leaf_hash, repr_limbs, CoinArm, FieldPath, KeyPath, KeyedPath, LedgerAdt,
-    LedgerCell, LedgerCounter, LedgerField, LedgerHistoricMerkleTree, LedgerList, LedgerMap,
-    LedgerMerkleTree, LedgerPath, LedgerRepr, LedgerSet, LedgerSlot, LedgerWidth,
-    MAX_FIELD_PATH, MAX_LEDGER_PATH, MAX_NESTING,
+    assert_distinct_kinds, leaf_hash, repr_limbs, standards, BlockLayout, CoinArm, FieldPath,
+    Fresh, KeyPath, KeyedPath, LedgerAdt, LedgerCell, LedgerCounter, LedgerField,
+    LedgerHistoricMerkleTree, LedgerList, LedgerMap, LedgerMerkleTree, LedgerPath, LedgerRepr,
+    LedgerSet, LedgerSlot, LedgerWidth, Placement, MAX_FIELD_PATH, MAX_LEDGER_PATH, MAX_NESTING,
 };
+
+/// Ledger headers (notes/ledger-header.org): a STANDARD is a type that
+/// claims `root[0]` of every block embedding it — [`LedgerHeader`] names its
+/// 32-byte magic ([`pad32`] writes one), `#[derive(LedgerHeader)]` places
+/// it, [`Magic`] is the magic's read-only slot, and [`HeaderField`] the
+/// sealed set of slot types a standard may own besides it.
+pub use header::{pad32, HeaderField, LedgerHeader, Magic};
+
+/// The deploy state (notes/ledger-header.org): every `#[derive(Ledger)]`
+/// block's `initial_state()` is a [`StateBuilder`] holding each slot's
+/// initial value at its path — compactc's `initialState` for the same fields,
+/// a standard's magic already written — which `set` edits the way a Compact
+/// constructor would and `build` assembles into the `StateValue` a deploy
+/// carries. [`InitialState`] is each slot type's share of it.
+pub use state::{InitialState, StateBuilder};
+
+/// The discriminator (notes/ledger-header.org): the 32 bytes at a contract
+/// state's first leaf — follow index 0 through at most three Arrays to one
+/// `bytes<32>` Cell, padded back to 32 — read from a `StateValue`
+/// ([`discriminator`]) or a serialized, tagged `ContractState` as the node and
+/// the indexer serve it ([`contract_state_discriminator`]), and compared with
+/// one standard's magic ([`implements`]). Off-chain; a claim, not proof.
+pub use discriminator::{contract_state_discriminator, discriminator, implements};
 
 /// Assertion predicates: `c.assert(less_than(0u64, amount))` — deferred,
 /// `#[must_use]` descriptors whose widths come from the operand types (see
@@ -182,6 +210,310 @@ pub use minocrab_macros::Ledger;
 /// ```
 #[cfg(feature = "macros")]
 pub use minocrab_macros::LedgerRepr;
+
+/// `#[derive(LedgerHeader)]` — a unit struct or a struct of single-field
+/// ledger slots becomes a STANDARD: `LedgerWidth::WIDTH = 0`,
+/// `PLACEMENT = Placement::root_header::<Self>()`, an `at_layout`
+/// constructor, a `magic()` handle, its deploy state and the compile-time
+/// checks. The derive and the trait share the name, as `LedgerRepr`'s do;
+/// the magic itself is written in `impl LedgerHeader` (see
+/// [`LedgerHeader`]).
+///
+/// A standard with fields is one Array at `root[0]`: the magic at `[0, 0]`,
+/// field `i` at `[0, i + 1]`, and the contract's own fields keep compactc's
+/// layout one root slot along, wherever the standard is declared:
+///
+/// ```
+/// use minocrab::Public;
+/// use minocrab_std::v3::{pad32, Ledger, LedgerField, LedgerHeader, LedgerMap, B32, Bool};
+///
+/// #[derive(LedgerHeader)]
+/// struct Versioned {
+///     version: LedgerField,
+///     admins: LedgerMap<B32<Public>, Bool<Public>>,
+/// }
+/// impl LedgerHeader for Versioned {
+///     const MAGIC: [u8; 32] = pad32(b"mip-0099:ledger-header[v1]");
+/// }
+///
+/// #[derive(Ledger)]
+/// struct Block {
+///     a: LedgerField,
+///     b: LedgerField,
+///     std: Versioned,
+/// }
+/// const BLOCK: Block = Block::new();
+///
+/// assert_eq!(BLOCK.std.magic().field_path().as_slice(), &[0, 0]);
+/// assert_eq!(BLOCK.std.version.field_path().as_slice(), &[0, 1]);
+/// assert_eq!(BLOCK.std.admins.field_path().as_slice(), &[0, 2]);
+/// assert_eq!(BLOCK.a.field_path().as_slice(), &[1]);
+/// assert_eq!(BLOCK.b.field_path().as_slice(), &[2]);
+/// ```
+///
+/// Every rejection is a compile error (FR-005). TWO STANDARDS in one block
+/// — E0080, "one standard per ledger block":
+///
+/// ```compile_fail
+/// use minocrab_std::v3::{pad32, Ledger, LedgerCounter, LedgerHeader};
+///
+/// #[derive(LedgerHeader)]
+/// struct A;
+/// impl LedgerHeader for A { const MAGIC: [u8; 32] = pad32(b"a"); }
+/// #[derive(LedgerHeader)]
+/// struct B;
+/// impl LedgerHeader for B { const MAGIC: [u8; 32] = pad32(b"b"); }
+///
+/// #[derive(Ledger)]
+/// struct Block { a: A, n: LedgerCounter, b: B }
+/// ```
+///
+/// THE SAME STANDARD TWICE is the same collision on `root[0]`:
+///
+/// ```compile_fail
+/// use minocrab_std::v3::{pad32, Ledger, LedgerCounter, LedgerHeader};
+///
+/// #[derive(LedgerHeader)]
+/// struct A;
+/// impl LedgerHeader for A { const MAGIC: [u8; 32] = pad32(b"a"); }
+///
+/// #[derive(Ledger)]
+/// struct Block { a: A, n: LedgerCounter, again: A }
+/// ```
+///
+/// while ONE, declared anywhere, compiles:
+///
+/// ```
+/// use minocrab_std::v3::{pad32, Ledger, LedgerCounter, LedgerHeader};
+///
+/// #[derive(LedgerHeader)]
+/// struct A;
+/// impl LedgerHeader for A { const MAGIC: [u8; 32] = pad32(b"a"); }
+///
+/// #[derive(Ledger)]
+/// struct Block { n: LedgerCounter, a: A }
+/// const BLOCK: Block = Block::new();
+/// assert_eq!(BLOCK.n.index(), 1);
+/// ```
+///
+/// AN ALL-ZERO MAGIC — E0080 (it is what an unset `Bytes<32>` cell holds):
+///
+/// ```compile_fail
+/// use minocrab_std::v3::{pad32, LedgerHeader};
+///
+/// #[derive(LedgerHeader)]
+/// struct Blank;
+/// impl LedgerHeader for Blank { const MAGIC: [u8; 32] = pad32(b""); }
+/// ```
+///
+/// SIXTEEN NAMED FIELDS — `1 + 16` entries do not fit the ledger's sixteen;
+/// the derive rejects it, spanned at the sixteenth:
+///
+/// ```compile_fail
+/// use minocrab_std::v3::{pad32, LedgerField, LedgerHeader};
+///
+/// #[derive(LedgerHeader)]
+/// struct Wide {
+///     f0: LedgerField, f1: LedgerField, f2: LedgerField, f3: LedgerField,
+///     f4: LedgerField, f5: LedgerField, f6: LedgerField, f7: LedgerField,
+///     f8: LedgerField, f9: LedgerField, f10: LedgerField, f11: LedgerField,
+///     f12: LedgerField, f13: LedgerField, f14: LedgerField, f15: LedgerField,
+/// }
+/// impl LedgerHeader for Wide { const MAGIC: [u8; 32] = pad32(b"wide"); }
+/// ```
+///
+/// while fifteen compile, the last at `[0, 15]`:
+///
+/// ```
+/// use minocrab_std::v3::{pad32, Ledger, LedgerField, LedgerHeader};
+///
+/// #[derive(LedgerHeader)]
+/// struct Wide {
+///     f0: LedgerField, f1: LedgerField, f2: LedgerField, f3: LedgerField,
+///     f4: LedgerField, f5: LedgerField, f6: LedgerField, f7: LedgerField,
+///     f8: LedgerField, f9: LedgerField, f10: LedgerField, f11: LedgerField,
+///     f12: LedgerField, f13: LedgerField, f14: LedgerField,
+/// }
+/// impl LedgerHeader for Wide { const MAGIC: [u8; 32] = pad32(b"wide"); }
+///
+/// #[derive(Ledger)]
+/// struct Block { std: Wide }
+/// const BLOCK: Block = Block::new();
+/// assert_eq!(BLOCK.std.f14.field_path().as_slice(), &[0, 15]);
+/// ```
+///
+/// A GROUP SLOT inside a standard — E0277, "cannot be a field of a ledger
+/// standard" (`Signet` is the same, in minocrab-contracts):
+///
+/// ```compile_fail
+/// use minocrab::v3::Circuit3;
+/// use minocrab::Public;
+/// use minocrab_std::v3::{blind::Add, pad32, LedgerHeader, Stream, StreamSpec, Uint};
+///
+/// struct Count;
+/// impl StreamSpec for Count {
+///     type Key = Uint<64, Public>; type Body = Uint<64, Public>; type Head = (); type State = Uint<64, Public>;
+///     type Step = Add;
+///     fn head(_c: &mut Circuit3, _b: &Uint<64, Public>) {}
+///     fn delta(c: &mut Circuit3, _h: &()) -> Uint<64, Public> { Uint::from_field_unchecked(c.constant(1u64)) }
+/// }
+///
+/// #[derive(LedgerHeader)]
+/// struct Grouped { count: Stream<Count> }
+/// impl LedgerHeader for Grouped { const MAGIC: [u8; 32] = pad32(b"grouped"); }
+/// ```
+///
+/// A STANDARD inside a standard — E0277 likewise: `root[0]` has one owner.
+///
+/// ```compile_fail
+/// use minocrab_std::v3::{pad32, LedgerHeader};
+///
+/// #[derive(LedgerHeader)]
+/// struct Inner;
+/// impl LedgerHeader for Inner { const MAGIC: [u8; 32] = pad32(b"inner"); }
+///
+/// #[derive(LedgerHeader)]
+/// struct Outer { inner: Inner }
+/// impl LedgerHeader for Outer { const MAGIC: [u8; 32] = pad32(b"outer"); }
+/// ```
+///
+/// The derive WITHOUT `impl LedgerHeader` — E0277, "`X` is laid out as a
+/// ledger standard but names no magic":
+///
+/// ```compile_fail
+/// use minocrab_std::v3::LedgerHeader;
+///
+/// #[derive(LedgerHeader)]
+/// struct Nameless;
+/// ```
+///
+/// THE MAGIC, PLACEMENT, WIDTH AND ONE-STANDARD RULES HOLD FOR A STANDARD
+/// WRITTEN BY HAND. `LedgerWidth` is an ordinary trait, but its `PLACEMENT`
+/// can say "root header" only as `Placement::root_header::<S>()`, which
+/// names a `LedgerHeader` and checks its magic, and `#[derive(Ledger)]`
+/// checks each standard's zero `WIDTH` and that there is at most one. The
+/// FIELD rules above (at most 15 named fields, each a single-field std
+/// slot, a magic-only standard one Cell at `[0]`) are the derive's, because
+/// it lays the fields out: a hand-written standard lays out and contributes
+/// its own, so keeping them is its author's job. Nothing refuses a breach
+/// at compile time; sixteen or more header entries, for one, fail only at
+/// `build()`, on the ledger's sixteen-entry Array bound. A hand-written
+/// standard that follows the rules compiles and is laid out like a derived
+/// one:
+///
+/// ```
+/// use minocrab_std::v3::{
+///     discriminator, pad32, BlockLayout, InitialState, Ledger, LedgerCounter, LedgerHeader,
+///     LedgerWidth, Magic, Placement, StateBuilder,
+/// };
+///
+/// struct Hand;
+/// impl LedgerWidth for Hand {
+///     const WIDTH: usize = 0;
+///     const PLACEMENT: Placement = Placement::root_header::<Hand>();
+/// }
+/// impl LedgerHeader for Hand { const MAGIC: [u8; 32] = pad32(b"hand"); }
+/// impl Hand {
+///     const fn at_layout(_layout: BlockLayout, _start: usize) -> Self { Hand }
+///     const fn magic(&self) -> Magic { Magic::at_path(&[0]) }
+/// }
+/// impl InitialState for Hand {
+///     fn contribute(&self, state: &mut StateBuilder) { state.magic::<Hand>(self.magic()); }
+/// }
+///
+/// #[derive(Ledger)]
+/// struct Block { n: LedgerCounter, std: Hand }
+/// const BLOCK: Block = Block::new();
+/// assert_eq!(BLOCK.n.index(), 1);
+/// assert_eq!(discriminator(&Block::initial_state().build()), Some(Hand::MAGIC));
+/// ```
+///
+/// A root header WITHOUT a standard behind it — E0277, "names no magic":
+///
+/// ```compile_fail
+/// use minocrab_std::v3::{
+///     BlockLayout, InitialState, Ledger, LedgerCounter, LedgerWidth, Placement, StateBuilder,
+/// };
+///
+/// struct Fake;
+/// impl LedgerWidth for Fake {
+///     const WIDTH: usize = 0;
+///     const PLACEMENT: Placement = Placement::root_header::<Fake>();
+/// }
+/// impl Fake { const fn at_layout(_layout: BlockLayout, _start: usize) -> Self { Fake } }
+/// impl InitialState for Fake { fn contribute(&self, _state: &mut StateBuilder) {} }
+///
+/// #[derive(Ledger)]
+/// struct Block { n: LedgerCounter, std: Fake }
+/// ```
+///
+/// A hand-written ALL-ZERO MAGIC — E0080, "a standard's MAGIC is all zero
+/// bytes", from its placement:
+///
+/// ```compile_fail
+/// use minocrab_std::v3::{
+///     BlockLayout, InitialState, Ledger, LedgerCounter, LedgerHeader, LedgerWidth, Placement,
+///     StateBuilder,
+/// };
+///
+/// struct Zero;
+/// impl LedgerWidth for Zero {
+///     const WIDTH: usize = 0;
+///     const PLACEMENT: Placement = Placement::root_header::<Zero>();
+/// }
+/// impl LedgerHeader for Zero { const MAGIC: [u8; 32] = [0; 32]; }
+/// impl Zero { const fn at_layout(_layout: BlockLayout, _start: usize) -> Self { Zero } }
+/// impl InitialState for Zero { fn contribute(&self, _state: &mut StateBuilder) {} }
+///
+/// #[derive(Ledger)]
+/// struct Block { std: Zero, n: LedgerCounter }
+/// ```
+///
+/// …and from a reader's `implements`, whatever the type's placement (32
+/// zero bytes are what a never-written `Bytes<32>` first field holds). Its
+/// check is an inline `const` evaluated when the call is monomorphized, so
+/// the E0080 surfaces in `cargo build` / `cargo test`, not in
+/// `cargo check`, clippy or rust-analyzer (the placement check above
+/// surfaces in `cargo check` too):
+///
+/// ```compile_fail
+/// use minocrab_std::v3::{implements, LedgerHeader, LedgerWidth, StateBuilder};
+///
+/// struct ZeroClaim;
+/// impl LedgerWidth for ZeroClaim {}
+/// impl LedgerHeader for ZeroClaim { const MAGIC: [u8; 32] = [0; 32]; }
+///
+/// let _ = implements::<ZeroClaim>(&StateBuilder::new().build());
+/// ```
+///
+/// A root header that also takes a BODY FIELD (`WIDTH != 0`) — E0080, "a
+/// standard occupies no body field":
+///
+/// ```compile_fail
+/// use minocrab_std::v3::{
+///     pad32, BlockLayout, InitialState, Ledger, LedgerCounter, LedgerHeader, LedgerWidth,
+///     Placement, StateBuilder,
+/// };
+///
+/// struct Wide;
+/// impl LedgerWidth for Wide {
+///     const WIDTH: usize = 1;
+///     const PLACEMENT: Placement = Placement::root_header::<Wide>();
+/// }
+/// impl LedgerHeader for Wide { const MAGIC: [u8; 32] = pad32(b"wide"); }
+/// impl Wide { const fn at_layout(_layout: BlockLayout, _start: usize) -> Self { Wide } }
+/// impl InitialState for Wide { fn contribute(&self, _state: &mut StateBuilder) {} }
+///
+/// #[derive(Ledger)]
+/// struct Block { std: Wide, n: LedgerCounter }
+/// ```
+///
+/// A standard hidden inside a hand-written GROUP SLOT is the one case the
+/// types cannot see (the derive counts the block's own fields): the
+/// block's `initial_state()` refuses it at run time, naming the
+/// one-standard rule (see `LedgerWidth`).
+#[cfg(feature = "macros")]
+pub use minocrab_macros::LedgerHeader;
 
 /// `#[interface]` — a bodyless trait declaring another contract's circuits
 /// becomes a typed calling handle over `minocrab_ledger::call`. The

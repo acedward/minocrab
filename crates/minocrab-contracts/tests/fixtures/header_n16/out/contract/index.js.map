@@ -1,0 +1,8 @@
+{
+  "version": 3,
+  "file": "index.js",
+  "sourceRoot": "../../../../../../../",
+  "sources": ["crates/minocrab-contracts/tests/fixtures/header_n16/header_n16.compact"],
+  "names": [],
+  "mappings": ";;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;EAgDA;;;;;;;;;;MAIA,AAAA,KAEC;;;;;cAFoB,GAAW;;;;;;;;;;;;;;;;;;yCAAX,GAAW;;;;;;;wEAAX,GAAW;;;;OAE/B;;;;GAJA;EAFD;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;IAjBA;;;;;;;;;;;;;;;;wEAAsC;IACtC;;;;;;;;;;;;;;;;wEAA2B;IAC3B;;;;;;;;;;;;;;;;wEAA2B;IAC3B;;;;;;;;;;;;;;;;wEAA2B;IAC3B;;;;;;;;;;;;;;;;wEAA2B;IAC3B;;;;;;;;;;;;;;;;wEAA2B;IAC3B;;;;;;;;;;;;;;;;wEAA2B;IAC3B;;;;;;;;;;;;;;;;wEAA2B;IAC3B;;;;;;;;;;;;;;;;wEAA2B;IAC3B;;;;;;;;;;;;;;;;wEAA2B;IAC3B;;;;;;;;;;;;;;;;wEAA4B;IAC5B;;;;;;;;;;;;;;;;wEAA4B;IAC5B;;;;;;;;;;;;;;;;wEAA4B;IAC5B;;;;;;;;;;;;;;;;wEAA4B;IAC5B;;;;;;;;;;;;;;;;wEAA4B;IAC5B;;;;;;;;;;;;;;;;wEAA4B;IAG1B;;;;;;;;;;;;;;;;wEAAK;;;;;;;GACN;EAED,AAAA,cAEC,4BAFoB,GAAW;IAC9B;;;;;;;;;;;;;2HAAe,GAAC;;;wEAAb;;GACJ;;;;;;;;;;;;;;;;IAvBD;qCAAA;;;;;;;;;;;;;;0GAAsC;KAAA;IACtC;qCAAA;;;;;;;;;;;;;;0GAA2B;KAAA;IAC3B;qCAAA;;;;;;;;;;;;;;0GAA2B;KAAA;IAC3B;qCAAA;;;;;;;;;;;;;;0GAA2B;KAAA;IAC3B;qCAAA;;;;;;;;;;;;;;0GAA2B;KAAA;IAC3B;qCAAA;;;;;;;;;;;;;;0GAA2B;KAAA;IAC3B;qCAAA;;;;;;;;;;;;;;0GAA2B;KAAA;IAC3B;qCAAA;;;;;;;;;;;;;;0GAA2B;KAAA;IAC3B;qCAAA;;;;;;;;;;;;;;0GAA2B;KAAA;IAC3B;qCAAA;;;;;;;;;;;;;;0GAA2B;KAAA;IAC3B;qCAAA;;;;;;;;;;;;;;0GAA4B;KAAA;IAC5B;qCAAA;;;;;;;;;;;;;;0GAA4B;KAAA;IAC5B;qCAAA;;;;;;;;;;;;;;0GAA4B;KAAA;IAC5B;qCAAA;;;;;;;;;;;;;;0GAA4B;KAAA;IAC5B;qCAAA;;;;;;;;;;;;;;0GAA4B;KAAA;IAC5B;qCAAA;;;;;;;;;;;;;;0GAA4B;KAAA;;;;;;;;;;;;"
+}

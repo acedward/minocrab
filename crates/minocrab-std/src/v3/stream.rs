@@ -73,7 +73,7 @@
 //! ```
 //!
 //! The stream is a NESTED LEDGER STRUCT: `#[derive(Ledger)]` places it by
-//! [`LedgerWidth`] and [`Stream::at_block`], as it places `Pending` and the
+//! [`LedgerWidth`] and [`Stream::at_layout`], as it places `Pending` and the
 //! other multi-field slots. The handles are built from the block position
 //! when a method runs, because the layout is chosen by the step's trait and
 //! a trait method cannot run in a `const` constructor.
@@ -86,8 +86,9 @@ use minocrab::Public;
 use super::assumed::{Assumed, ProofWires};
 use super::blind::{Add, And, First, Last, Max, Min, Or, Primitive};
 use super::hook::Hook;
-use super::ledger::{LedgerCell, LedgerMap, LedgerRepr, LedgerWidth};
+use super::ledger::{BlockLayout, LedgerCell, LedgerMap, LedgerRepr, LedgerWidth};
 use super::predicate::{is_true, not};
+use super::state::{InitialState, StateBuilder};
 use super::NonEmpty;
 
 /// What a stream carries and how it steps.
@@ -123,6 +124,9 @@ pub trait Step<P: StreamSpec>: Sized {
     fn insert(s: &Stream<P>, c: &mut Circuit3, key: &P::Key, body: &P::Body);
     fn take(s: &Stream<P>, c: &mut Circuit3, key: &P::Key) -> (Assumed<P::Body>, Assumed<P::State>);
     fn combine(s: &Stream<P>, c: &mut Circuit3, delta: Self::Delta);
+    /// The step's fields at deploy (notes/ledger-header.org): every cell at
+    /// its default, every map empty. Off-chain; no circuit.
+    fn contribute(s: &Stream<P>, state: &mut StateBuilder);
 }
 
 /// A step of real code, for [`Serial`]: `s ⊕ d` however the author likes,
@@ -145,27 +149,36 @@ pub struct Serial<F, const REST: usize>(PhantomData<fn() -> F>);
 pub trait ContentionFree {}
 
 /// The stream, placed in a ledger block.
+///
+/// It keeps its block's [`BlockLayout`] rather than building its handles in
+/// the constructor (see the module docs), so every member handle is laid
+/// out by the same value the block's own fields are.
 pub struct Stream<P: StreamSpec> {
-    total: usize,
+    layout: BlockLayout,
     start: usize,
     _p: PhantomData<fn() -> P>,
 }
 
 impl<P: StreamSpec> Stream<P> {
-    /// The stream's fields from flat index `start` of a block of `total`
-    /// fields — what `#[derive(Ledger)]` emits for a field spelled
-    /// `Stream<…>`.
-    pub const fn at_block(total: usize, start: usize) -> Self {
+    /// The stream's fields from flat body index `start` under `layout` —
+    /// what `#[derive(Ledger)]` emits for a field spelled `Stream<…>`.
+    pub const fn at_layout(layout: BlockLayout, start: usize) -> Self {
         Stream {
-            total,
+            layout,
             start,
             _p: PhantomData,
         }
     }
 
+    /// The stream's fields from flat index `start` of a block of `total`
+    /// fields, at compactc's layout.
+    pub const fn at_block(total: usize, start: usize) -> Self {
+        Stream::at_layout(BlockLayout::compactc(total), start)
+    }
+
     /// Handle → body. Field `start`.
     fn bodies(&self) -> LedgerMap<P::Key, P::Body> {
-        LedgerMap::at_block(self.total, self.start)
+        LedgerMap::at_layout(self.layout, self.start)
     }
 
     /// INSERT under `key`: asserts the key is not present, stores the
@@ -190,6 +203,17 @@ impl<P: StreamSpec> Stream<P> {
 
 impl<P: StreamSpec> LedgerWidth for Stream<P> {
     const WIDTH: usize = 1 + <P::Step as Step<P>>::WIDTH;
+}
+
+/// The bodies map, then the step's fields — each at its own default. The
+/// accumulator starts at its cells' default, which is the identity of `Add`,
+/// `Max` and `Or` and not of `Min` or `And`: `StateBuilder::set` the cell for
+/// a stream that must start at the identity.
+impl<P: StreamSpec> InitialState for Stream<P> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        self.bodies().contribute(state);
+        <P::Step as Step<P>>::contribute(self, state);
+    }
 }
 
 impl<P: StreamSpec> ContentionFree for Stream<P> where P::Step: Primitive<P::State> {}
@@ -226,9 +250,9 @@ macro_rules! primitive_steps {
                 bodies.insert(c, key, body);
                 let head = P::head(c, body);
                 let delta = P::delta(c, &head);
-                let acc = <$ty as Primitive<P::State>>::acc_at_block(s.total, s.start + 1);
-                let snapshot = <$ty as Primitive<P::State>>::snapshot_at_block::<P::Key>(
-                    s.total,
+                let acc = <$ty as Primitive<P::State>>::acc_at_layout(s.layout, s.start + 1);
+                let snapshot = <$ty as Primitive<P::State>>::snapshot_at_layout::<P::Key>(
+                    s.layout,
                     s.start + 1 + <$ty as Primitive<P::State>>::ACC_FIELDS,
                 );
                 // The blind half is a hook (M42): it runs after the body,
@@ -247,8 +271,8 @@ macro_rules! primitive_steps {
                 c.assert(is_true(present).message("Stream key not present"));
                 let body = bodies.lookup(c, key);
                 bodies.remove(c, key);
-                let snapshot = <$ty as Primitive<P::State>>::snapshot_at_block::<P::Key>(
-                    s.total,
+                let snapshot = <$ty as Primitive<P::State>>::snapshot_at_layout::<P::Key>(
+                    s.layout,
                     s.start + 1 + <$ty as Primitive<P::State>>::ACC_FIELDS,
                 );
                 let state = <$ty as Primitive<P::State>>::take(c, &snapshot, key);
@@ -256,9 +280,19 @@ macro_rules! primitive_steps {
             }
 
             fn combine(s: &Stream<P>, c: &mut Circuit3, delta: P::State) {
-                let acc = <$ty as Primitive<P::State>>::acc_at_block(s.total, s.start + 1);
+                let acc = <$ty as Primitive<P::State>>::acc_at_layout(s.layout, s.start + 1);
                 let hook = <$ty as Primitive<P::State>>::combine(c, Hook::new(), &acc, &delta);
                 c.then(hook);
+            }
+
+            /// The accumulator's cells, then the snapshot maps.
+            fn contribute(s: &Stream<P>, state: &mut StateBuilder) {
+                <$ty as Primitive<P::State>>::acc_at_layout(s.layout, s.start + 1).contribute(state);
+                <$ty as Primitive<P::State>>::snapshot_at_layout::<P::Key>(
+                    s.layout,
+                    s.start + 1 + <$ty as Primitive<P::State>>::ACC_FIELDS,
+                )
+                .contribute(state);
             }
         }
     )*};
@@ -315,6 +349,13 @@ where
         let next = F::step(c, state, delta);
         acc.write(c, &next);
     }
+
+    /// The heads map, the accumulator cell, the staged map.
+    fn contribute(s: &Stream<P>, state: &mut StateBuilder) {
+        s.heads().contribute(state);
+        s.acc().contribute(state);
+        s.staged().contribute(state);
+    }
 }
 
 impl<P, F, const REST: usize> Stream<P>
@@ -326,17 +367,17 @@ where
 {
     /// Handle → head. Field `start + 1`.
     fn heads(&self) -> LedgerMap<P::Key, P::Head> {
-        LedgerMap::at_block(self.total, self.start + 1)
+        LedgerMap::at_layout(self.layout, self.start + 1)
     }
 
     /// THE shared cell. Field `start + 2`.
     fn acc(&self) -> LedgerCell<P::State> {
-        LedgerCell::at_block(self.total, self.start + 2)
+        LedgerCell::at_layout(self.layout, self.start + 2)
     }
 
     /// Handle → the post-step state it was sequenced with. Field `start + 3`.
     fn staged(&self) -> LedgerMap<P::Key, P::State> {
-        LedgerMap::at_block(self.total, self.start + 3)
+        LedgerMap::at_layout(self.layout, self.start + 3)
     }
 
     /// SEQUENCE: the flusher's choice of subset AND order, one to `REST + 1`

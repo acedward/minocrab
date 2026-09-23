@@ -1,0 +1,54 @@
+pragma language_version >= 0.25;
+
+// Project 00002 fixture (fork work) — A MAGIC-FIRST LEDGER BLOCK: the Compact
+// twin of a minocrab block that embeds a magic-only ledger-header standard
+// (notes/ledger-header.org).
+//
+//   nix build .#compactc          # at the repo root, provides ./result
+//   ./result/bin/compactc --skip-zk --feature-zkir-v3 \
+//       crates/minocrab-contracts/tests/fixtures/header_small/header_small.compact \
+//       crates/minocrab-contracts/tests/fixtures/header_small/out
+//
+// The standard's 32-byte magic is the FIRST field, so compactc gives it
+// index 0, and with five fields (at most fifteen) the root is one flat Array:
+//
+//   [0] magic     Cell  Bytes<32>   written by the constructor only (sealed)
+//   [1] value     Cell  Uint<64>    setValue: a depth-1 Cell write
+//   [2] count     Counter           bump:     a Counter increment
+//   [3] balances  Map<Bytes<32>, Uint<64>>   credit: a Map insert
+//   [4] owner     Cell  Bytes<32>   never written: a 32-byte Cell at the END,
+//                                   so a reader that is not following index 0
+//                                   has a wrong candidate to find
+//
+// That is exactly the layout minocrab gives the same four body fields in a
+// headed block (the standard at [0], the body one root slot along), which is
+// why this fixture is the parity oracle: every circuit's ZKIR and the initial
+// state of compactc's generated `initialState` must equal minocrab's.
+//
+// The magic is the provisional test value pad32("mip-0099:ledger-header[v1]")
+// (26 ASCII bytes, NUL-padded; stored trimmed). Test networks only: the MIP
+// number is not assigned.
+
+import CompactStandardLibrary;
+
+export sealed ledger magic: Bytes<32>;
+export ledger value: Uint<64>;
+export ledger count: Counter;
+export ledger balances: Map<Bytes<32>, Uint<64>>;
+export ledger owner: Bytes<32>;
+
+constructor() {
+  magic = pad(32, "mip-0099:ledger-header[v1]");
+}
+
+export circuit setValue(v: Uint<64>): [] {
+  value = disclose(v);
+}
+
+export circuit bump(): [] {
+  count.increment(1);
+}
+
+export circuit credit(k: Bytes<32>, v: Uint<64>): [] {
+  balances.insert(disclose(k), disclose(v));
+}

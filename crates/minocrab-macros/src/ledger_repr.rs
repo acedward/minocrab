@@ -22,6 +22,12 @@
 //!         a.extend(<Uint<64, Public>>::atoms());
 //!         a
 //!     }
+//!     fn default_stored() -> Vec<Vec<u8>> { // the deploy state's Cell default
+//!         let mut d = Vec::new();
+//!         d.extend(<UserCommitment<Public>>::default_stored());
+//!         d.extend(<Uint<64, Public>>::default_stored());
+//!         d
+//!     }
 //!     fn push_limbs(&self, c, limbs) {
 //!         self.depositor.push_limbs(c, limbs);
 //!         self.amount.push_limbs(c, limbs);
@@ -104,6 +110,12 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 atoms
             }
 
+            fn default_stored() -> ::std::vec::Vec<::std::vec::Vec<u8>> {
+                let mut stored = ::std::vec::Vec::new();
+                #( stored.extend(<#types as #root::LedgerRepr>::default_stored()); )*
+                stored
+            }
+
             fn push_limbs(
                 &self,
                 c: &mut #root::Circuit3,
@@ -145,6 +157,24 @@ mod tests {
         .to_string();
         assert!(!expanded.contains("c ."), "{expanded}");
         assert!(expanded.contains("repr_limbs :: < B32 < Public > >"), "{expanded}");
+    }
+
+    /// A record's default is its fields' defaults in declaration order —
+    /// a field that is a curve point keeps its identity (the deploy state).
+    #[test]
+    fn the_default_is_the_fields_defaults_in_order() {
+        let expanded = expand(syn::parse_quote! {
+            struct Env { a: B32<Public>, b: Uint<64, Public> }
+        })
+        .expect("expands")
+        .to_string();
+        let a = expanded
+            .find("stored . extend (< B32 < Public > as :: minocrab_std :: v3 :: __derive :: LedgerRepr > :: default_stored ())")
+            .expect("a's default");
+        let b = expanded
+            .find("stored . extend (< Uint < 64 , Public > as :: minocrab_std :: v3 :: __derive :: LedgerRepr > :: default_stored ())")
+            .expect("b's default");
+        assert!(a < b, "{expanded}");
     }
 
     #[test]

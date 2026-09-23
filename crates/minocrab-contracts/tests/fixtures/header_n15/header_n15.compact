@@ -1,0 +1,63 @@
+pragma language_version >= 0.25;
+
+// Project 00002 fixture (fork work) — THE WIDEST FLAT MAGIC-FIRST BLOCK: the
+// Compact twin of a minocrab block that embeds a magic-only ledger-header
+// standard and FOURTEEN own fields (notes/ledger-header.org).
+//
+//   nix build .#compactc          # at the repo root, provides ./result
+//   ./result/bin/compactc --skip-zk --feature-zkir-v3 \
+//       crates/minocrab-contracts/tests/fixtures/header_n15/header_n15.compact \
+//       crates/minocrab-contracts/tests/fixtures/header_n15/out
+//
+// Fifteen fields in all — the most `determine-ledger-paths.ss` keeps in one
+// flat root (a segment is fifteen wide) — so every field's path is its bare
+// declaration index, the magic first:
+//
+//   [0]  magic  Cell  Bytes<32>             written by the constructor only (sealed)
+//   [1]  f1     Cell  Uint<64>              wFirst: a depth-1 Cell write
+//   [8]  f8     Counter                     bump:   a Counter increment
+//   [14] f14    Map<Uint<64>, Uint<64>>     credit: a Map insert at the root's LAST entry
+//   every other fK a Uint<64> Cell
+//
+// minocrab's headed rule gives the same fourteen fields [1]..[14] behind the
+// standard at [0]: this is the largest block for which the two layouts
+// coincide (spec 00002 FR-010's "up to 14 own fields"). One more own field
+// and compactc segments the block (`header_n16`, the negative control).
+//
+// The magic is the provisional test value pad32("mip-0099:ledger-header[v1]")
+// (26 ASCII bytes, NUL-padded; stored trimmed). Test networks only: the MIP
+// number is not assigned.
+
+import CompactStandardLibrary;
+
+export sealed ledger magic: Bytes<32>;
+export ledger f1: Uint<64>;
+export ledger f2: Uint<64>;
+export ledger f3: Uint<64>;
+export ledger f4: Uint<64>;
+export ledger f5: Uint<64>;
+export ledger f6: Uint<64>;
+export ledger f7: Uint<64>;
+export ledger f8: Counter;
+export ledger f9: Uint<64>;
+export ledger f10: Uint<64>;
+export ledger f11: Uint<64>;
+export ledger f12: Uint<64>;
+export ledger f13: Uint<64>;
+export ledger f14: Map<Uint<64>, Uint<64>>;
+
+constructor() {
+  magic = pad(32, "mip-0099:ledger-header[v1]");
+}
+
+export circuit wFirst(v: Uint<64>): [] {
+  f1 = disclose(v);
+}
+
+export circuit bump(): [] {
+  f8.increment(1);
+}
+
+export circuit credit(k: Uint<64>, v: Uint<64>): [] {
+  f14.insert(disclose(k), disclose(v));
+}

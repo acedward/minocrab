@@ -1,0 +1,55 @@
+pragma language_version >= 0.25;
+
+// Project 00002 fixture (fork work) — THE NEGATIVE CONTROL of the
+// ledger-header parity: a magic-first block ONE field too wide for compactc
+// to keep flat (notes/ledger-header.org). It is P0b's Probe B `n16`
+// verbatim, recompiled here at its in-repo path.
+//
+//   nix build .#compactc          # at the repo root, provides ./result
+//   ./result/bin/compactc --skip-zk --feature-zkir-v3 \
+//       crates/minocrab-contracts/tests/fixtures/header_n16/header_n16.compact \
+//       crates/minocrab-contracts/tests/fixtures/header_n16/out
+//
+// Sixteen fields: the magic and fifteen own `Uint<64>` cells. compactc
+// batches them into segments of fifteen, remainder first (the `wide`
+// fixture's rule), so the root is TWO entries and every path is two long:
+//
+//   [0, 0]         magic   Cell Bytes<32>   written by the constructor only (sealed)
+//   [1, 0]..[1, 14] f1..f15 Cell Uint<64>   wLast: f15 = v, a depth-2 Cell write
+//
+// minocrab's headed rule lays the same fifteen own fields out FLAT behind the
+// standard — the magic at [0], fK at [K], a sixteen-entry root — so its port
+// is NOT compactc's, by design: the root's shape differs, and wLast writes
+// [15] where compactc writes [1, 14]. That difference, and only it, is what
+// the test asserts.
+//
+// The magic is the provisional test value pad32("mip-0099:ledger-header[v1]")
+// (26 ASCII bytes, NUL-padded; stored trimmed). Test networks only: the MIP
+// number is not assigned.
+
+import CompactStandardLibrary;
+
+export sealed ledger magic: Bytes<32>;
+export ledger f1: Uint<64>;
+export ledger f2: Uint<64>;
+export ledger f3: Uint<64>;
+export ledger f4: Uint<64>;
+export ledger f5: Uint<64>;
+export ledger f6: Uint<64>;
+export ledger f7: Uint<64>;
+export ledger f8: Uint<64>;
+export ledger f9: Uint<64>;
+export ledger f10: Uint<64>;
+export ledger f11: Uint<64>;
+export ledger f12: Uint<64>;
+export ledger f13: Uint<64>;
+export ledger f14: Uint<64>;
+export ledger f15: Uint<64>;
+
+constructor() {
+  magic = pad(32, "mip-0099:ledger-header[v1]");
+}
+
+export circuit wLast(v: Uint<64>): [] {
+  f15 = disclose(v);
+}

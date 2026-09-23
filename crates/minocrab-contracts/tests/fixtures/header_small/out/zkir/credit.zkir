@@ -1,0 +1,21 @@
+{
+  "version": { "major": 3, "minor": 0 },
+  "do_communications_commitment": true,
+  "inputs": [
+    { "name": "%k.0", "type": "Scalar<BLS12-381>" },
+    { "name": "%k.1", "type": "Scalar<BLS12-381>" },
+    { "name": "%v.2", "type": "Scalar<BLS12-381>" }
+  ],
+  "outputs": [
+  ],
+  "instructions": [
+    { "op": "constrain_bits", "val": "%k.0", "bits": 8 },
+    { "op": "constrain_bits", "val": "%k.1", "bits": 248 },
+    { "op": "constrain_bits", "val": "%v.2", "bits": 64 },
+    { "op": "impact", "guard": "0x01", "inputs": ["0x70", "0x01", "0x01", "0x03"] },
+    { "op": "impact", "guard": "0x01", "inputs": ["0x10", "0x01", "0x01", "0x20", "%k.0", "%k.1"] },
+    { "op": "impact", "guard": "0x01", "inputs": ["0x11", "0x01", "0x01", "0x08", "%v.2"] },
+    { "op": "impact", "guard": "0x01", "inputs": ["0x91"] },
+    { "op": "impact", "guard": "0x01", "inputs": ["0xa1"] }
+  ]
+}
