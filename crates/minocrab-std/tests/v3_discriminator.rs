@@ -7,11 +7,16 @@
 //!   fields), wherever the block declares it; a plain `Bytes<32>` cell
 //!   written first, compactc-style, at `[0]`, `[0, 0]` and `[0, 0, 0]`.
 //! - REFUSED (`None`): a first leaf that is a Counter, a Map, Null, a
-//!   `Bytes<16>` Cell, a Cell of several atoms or of a field atom, a List or
-//!   a Merkle tree; an empty root; a root that is not an Array; a nest deeper
-//!   than three; a Cell that does not fit its own alignment.
+//!   `Bytes<16>` Cell, a Cell of several atoms or of a field atom, an EMPTY
+//!   List or a Merkle tree; an empty root; a root that is not an Array; a
+//!   nest deeper than three; a Cell that does not fit its own alignment.
 //! - `implements::<S>`: the discriminator compared with one standard's
 //!   magic, true and false.
+//! - WHAT THE RULE CANNOT TELL (a claim, not proof), pinned through the VM:
+//!   a pushed `List<Bytes<32>>` first field reads its current head (the
+//!   list node `[head, tail, length]` is shaped like a three-field block),
+//!   and a contract's own circuit can rewrite a standard's magic through a
+//!   hand-written path.
 //!
 //! The same reader on SERIALIZED, tagged `ContractState`s — every deployed
 //! block of the deploy gate, compactc's own initial states, and bytes that
@@ -23,8 +28,10 @@ use midnight_onchain_state::state::StateValue;
 use midnight_storage::arena::Sp;
 use midnight_storage::db::InMemoryDB;
 use midnight_storage::storage::Array;
+use minocrab::v3::{Circuit3, Compiled3};
 use minocrab::{Alignment, AlignmentAtom, AlignmentSegment, Public};
 use minocrab_ledger::{empty_counter, empty_map, stored_cell};
+use minocrab_sim::v3::exec::{self, Call};
 use minocrab_std::v3::{
     discriminator, implements, pad32, Bytes, FieldPath, Ledger, LedgerCell, LedgerCounter,
     LedgerField, LedgerHeader, LedgerList, LedgerMap, LedgerMerkleTree, LedgerRepr, Maybe,
@@ -451,14 +458,15 @@ fn a_first_leaf_of_any_other_shape_is_none() {
     );
     assert_eq!(discriminator(&state), None, "a field-atom Cell");
 
-    // A List ([0] an Array whose first entry is Null) and a Merkle tree
-    // ([0] an Array whose first entry is the tree).
+    // An EMPTY List ([0] an Array whose first entry is Null) and a Merkle
+    // tree ([0] an Array whose first entry is the tree). A PUSHED List is
+    // another matter: see `a_pushed_list_first_field_reads_its_head`.
     let state = with_magic(
         ListFirst::initial_state(),
         ListFirst::new().magic.field_path(),
     );
     assert!(matches!(at(&state, &[0, 0]), StateValue::Null));
-    assert_eq!(discriminator(&state), None, "a List");
+    assert_eq!(discriminator(&state), None, "an empty List");
     let state = with_magic(
         TreeFirst::initial_state(),
         TreeFirst::new().magic.field_path(),
@@ -580,4 +588,53 @@ fn implements_compares_the_discriminator_with_one_standards_magic() {
     );
     assert!(!implements::<Mip0099>(&counter));
     assert!(!implements::<Mip0099>(&Empty::initial_state().build()));
+}
+
+// ---- what the rule cannot tell: a claim, not proof ----------------------------------------
+
+/// `state` after `circuit` runs on it through Midnight's VM (the executor).
+fn run(circuit: &Compiled3, state: &State) -> State {
+    let context = exec::context(state.clone(), [7; 32]);
+    exec::execute(&circuit.ir, &Call::new(&[], &[]), &context)
+        .expect("the circuit runs through QueryContext::query")
+        .post
+}
+
+/// A NON-headed contract whose first field is a `List<Bytes<32>>`: empty,
+/// it has no discriminator; once a circuit pushes onto it, the list node
+/// `[head, tail, length]` has exactly the shape of a three-field block
+/// `{Bytes<32>, List, Counter}`, so the walk reads the head — and whoever
+/// may call the push "claims" any standard, until the next push or pop.
+/// Inherent to the rule (spec FR-008); pinned so the docs cannot drift.
+#[test]
+fn a_pushed_list_first_field_reads_its_head() {
+    const LIST: ListFirst = ListFirst::new();
+    let empty = ListFirst::initial_state().build();
+    assert_eq!(discriminator(&empty), None, "the empty List: None");
+    let mut c = Circuit3::new();
+    let head = B32::pad(&mut c, "mip-0099:ledger-header[v1]");
+    LIST.list.push_front(&mut c, &head);
+    let pushed = run(&c.finish(false), &empty);
+    assert!(matches!(at(&pushed, &[0, 0]), StateValue::Cell(_)));
+    assert!(matches!(at(&pushed, &[0, 1]), StateValue::Array(_)));
+    assert_eq!(discriminator(&pushed), Some(Mip0099::MAGIC));
+    assert!(implements::<Mip0099>(&pushed));
+}
+
+/// No typed handle writes a standard's magic (`Magic` has no write or
+/// reset), but `LedgerCell::at_path` on the magic's own path is an ordinary
+/// typed write: a contract's OWN circuit can drop or change its claim, no
+/// maintenance update needed. The verifier-key caveat covers it.
+#[test]
+fn a_circuit_that_names_the_magics_path_by_hand_can_rewrite_it() {
+    const BLOCK: HeadedFlat = HeadedFlat::new();
+    let deployed = HeadedFlat::initial_state().build();
+    assert!(implements::<Mip0099>(&deployed));
+    let by_hand: LedgerCell<B32P> = LedgerCell::at_path(BLOCK.std.magic().field_path().as_slice());
+    let mut c = Circuit3::new();
+    let other = B32::pad(&mut c, "another claim");
+    by_hand.write(&mut c, &other);
+    let rewritten = run(&c.finish(false), &deployed);
+    assert_eq!(discriminator(&rewritten), Some(pad32(b"another claim")));
+    assert!(!implements::<Mip0099>(&rewritten));
 }

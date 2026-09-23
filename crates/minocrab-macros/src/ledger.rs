@@ -219,7 +219,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             /// The block's DEPLOY-TIME state (notes/ledger-header.org): every
             /// slot's initial value at its path — what compactc's generated
             /// `initialState` builds for the same fields — and a standard's
-            /// magic, which no circuit writes. `set` what a Compact
+            /// magic, which no typed handle writes. `set` what a Compact
             /// constructor would write (an untyped `LedgerField` is left
             /// Null), then `build`.
             pub fn initial_state() -> ::minocrab_std::v3::StateBuilder {

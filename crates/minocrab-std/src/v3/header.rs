@@ -56,9 +56,10 @@
 //!   see; its block's `initial_state()` refuses it by name (see
 //!   `LedgerWidth`).
 //!
-//! A magic is a CLAIM, not proof: the deploy state is the deployer's, and a
-//! maintenance authority can install a circuit that writes `root[0]`.
-//! Pair it with a verifier-key check where it matters.
+//! A magic is a CLAIM, not proof: the deploy state is the deployer's, a
+//! circuit of the contract that names `root[0]` by hand can rewrite it, and
+//! a maintenance authority can install one that does. Pair it with a
+//! verifier-key check where it matters.
 
 use super::ledger::{BlockLayout, FieldPath, LedgerWidth, Placement};
 
@@ -119,9 +120,11 @@ pub const fn pad32(s: &[u8]) -> [u8; 32] {
 ///
 /// Returned by the `magic()` method `#[derive(LedgerHeader)]` gives the
 /// standard. No `write`, no `reset_to_default`: the value is the deploy
-/// state's, so no circuit written against the typed API can change it.
-/// A circuit that needs the value uses the constant
-/// (`<S as LedgerHeader>::MAGIC`); there is no in-circuit read here.
+/// state's, and no typed handle writes it. A circuit that names the path by
+/// hand (`LedgerCell::at_path(magic.field_path())`), or one installed by
+/// maintenance, can — a magic is a claim (see the module docs). A circuit
+/// that needs the value uses the constant (`<S as LedgerHeader>::MAGIC`);
+/// there is no in-circuit read here.
 #[derive(Clone, Copy)]
 pub struct Magic {
     path: FieldPath,

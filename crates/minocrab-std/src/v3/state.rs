@@ -26,8 +26,10 @@
 //!
 //! — the constants the circuits' own `resetToDefault` ops push, not a second
 //! table. The magic is the standard's `LedgerHeader::MAGIC`, stored the way
-//! compactc's constructor writes a `Bytes<32>` (trailing zero bytes dropped),
-//! so NO circuit ever writes it.
+//! compactc's constructor writes a `Bytes<32>` (trailing zero bytes
+//! dropped). The deploy state writes it and no typed handle does (`Magic`
+//! has no write or reset); a circuit that names its path by hand
+//! (`at_path`), or one installed by maintenance, can.
 //!
 //! What compactc's constructor would write besides — a sealed signer
 //! address, an owner — is the deployer's: [`StateBuilder::set`] replaces a

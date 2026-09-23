@@ -15,9 +15,11 @@
 //!   bytes), so the atom is right-padded back to 32. That is the
 //!   discriminator.
 //! - Anything else is `None`: a first leaf that is Null, a Map, a Merkle
-//!   tree, a Cell of any other alignment (a Counter's `bytes<8>`, a
-//!   `Bytes<16>`, a `Maybe` or a struct of several atoms), a root that is
-//!   not an Array or is empty, or an Array still at the fourth step.
+//!   tree, an EMPTY List, a Cell of any other alignment (a Counter's
+//!   `bytes<8>`, a `Bytes<16>`, a `Maybe` or a struct of several atoms), a
+//!   root that is not an Array or is empty, or an Array still at the fourth
+//!   step. A List that has been pushed to is `[head, tail, length]`, the
+//!   shape of a three-field block, so the walk reads its head (below).
 //!
 //! One rule finds a minocrab header of either shape (`[0]` magic-only,
 //! `[0, 0]` with fields) and a plain Compact contract that declares or
@@ -35,6 +37,11 @@
 //!   later. A reader that relies on the magic re-reads after every
 //!   `ContractUpdate`, or requires a frozen authority (an empty committee
 //!   with a threshold of at least one — the ledger's default).
+//! - A first leaf that a circuit can write — a public `Bytes<32>` cell, the
+//!   head of a `List<Bytes<32>>`, or a standard's magic named by a
+//!   hand-written path — is controlled by whoever may call that circuit.
+//!   So on a contract that is not headed, [`implements`] says nothing about
+//!   its code, and on a headed one only as much as its circuits allow.
 //! - What says a contract RUNS the standard's code is its verifier keys:
 //!   pair this read with a verifier-key comparison where it matters.
 //!
