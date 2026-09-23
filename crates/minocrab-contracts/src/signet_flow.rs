@@ -178,6 +178,39 @@ impl<R: CircuitBorsh<Private>> CircuitBorsh<Private> for Attested<R> {
 /// chain id, caip2 id and nonce from CONTEXT and `Pending::settle` the MPC
 /// key — none of them is an argument a circuit can pass wrongly. The
 /// `signer` cell is `sealed` (written at deployment, never by a circuit).
+///
+/// A block with a STANDARD (`#[derive(LedgerHeader)]`) keeps its Signet in
+/// the BODY, laid out one root slot along like every other body field. It
+/// cannot live inside the standard — five fields are not one header entry,
+/// and the derive threads a block's Signet from the block's own fields:
+///
+/// ```compile_fail
+/// use minocrab_contracts::signet_flow::Signet;
+/// use minocrab_std::v3::{pad32, LedgerHeader};
+///
+/// // error[E0277]: `Signet` cannot be a field of a ledger standard
+/// #[derive(LedgerHeader)]
+/// struct SignetStandard { signet: Signet }
+/// impl LedgerHeader for SignetStandard { const MAGIC: [u8; 32] = pad32(b"signet"); }
+/// ```
+///
+/// while the same standard beside the Signet compiles, the Signet at
+/// `[1]..[5]`:
+///
+/// ```
+/// use minocrab_contracts::signet_flow::Signet;
+/// use minocrab_std::v3::{pad32, Ledger, LedgerHeader};
+///
+/// #[derive(LedgerHeader)]
+/// struct Standard;
+/// impl LedgerHeader for Standard { const MAGIC: [u8; 32] = pad32(b"signet"); }
+///
+/// #[derive(Ledger)]
+/// struct Block { signet: Signet, std: Standard }
+/// const BLOCK: Block = Block::new();
+/// assert_eq!(BLOCK.signet.signer.field_path().as_slice(), &[1]);
+/// assert_eq!(BLOCK.signet.evm_chain_id.index(), 5);
+/// ```
 pub struct Signet {
     /// `sealed ledger signetSigner: SignetSigner` — the singleton's address.
     pub signer: LedgerField,

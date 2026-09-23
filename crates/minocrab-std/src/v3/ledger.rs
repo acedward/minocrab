@@ -905,7 +905,9 @@ pub const fn assert_distinct_kinds(kinds: &[&[u8]]) {
 }
 
 /// `at_layout`, `at_block` and a one-field [`LedgerWidth`] for each slot
-/// type: the declared-form constructors `#[derive(Ledger)]` calls.
+/// type: the declared-form constructors `#[derive(Ledger)]` calls. Also
+/// the sealed [`super::header::HeaderField`] marker: these eight are the
+/// slot types a standard may own besides its magic.
 macro_rules! one_field_slot {
     ($( [$($gen:tt)*] $ty:ty ),* $(,)?) => {$(
         impl<$($gen)*> $ty {
@@ -924,6 +926,9 @@ macro_rules! one_field_slot {
         }
 
         impl<$($gen)*> LedgerWidth for $ty {}
+
+        impl<$($gen)*> super::header::sealed::HeaderField for $ty {}
+        impl<$($gen)*> super::header::HeaderField for $ty {}
     )*};
 }
 
