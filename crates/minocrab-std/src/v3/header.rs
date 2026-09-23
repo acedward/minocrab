@@ -33,10 +33,10 @@
 //! THE RULE, all of it:
 //!
 //! - `#[derive(LedgerHeader)]` gives the type `LedgerWidth::WIDTH = 0` and
-//!   `PLACEMENT = RootHeader`. The block's width sums therefore leave it out,
-//!   and `#[derive(Ledger)]` lays the body out HEADED
-//!   ([`super::BlockLayout::headed`]): compactc's segmentation of the other
-//!   fields alone, at a frozen fifteen, every path's first element + 1.
+//!   `PLACEMENT = Placement::root_header::<Self>()`. The block's width
+//!   sums therefore leave it out, and `#[derive(Ledger)]` lays the body out
+//!   HEADED ([`super::BlockLayout::headed`]): compactc's segmentation of the
+//!   other fields alone, at a frozen fifteen, every path's first element + 1.
 //!   Where the standard is declared does not matter; depths are compactc's.
 //! - A UNIT struct is magic-only: a Cell at `[0]`. A struct with NAMED
 //!   fields is an Array at `[0]` of `1 + n` entries: the magic at `[0, 0]`,
@@ -47,6 +47,14 @@
 //!   carries only its path, and its value comes from the deploy state.
 //! - One standard per block (E0080); an all-zero magic is E0080 (it is what
 //!   an unset `Bytes<32>` cell holds, so no reader could tell it from none).
+//!   Both hold however the standard is written: `Placement::root_header`
+//!   is the only way to claim `root[0]` and checks the magic,
+//!   `#[derive(Ledger)]` counts the standards and checks each one's zero
+//!   `WIDTH` ([`super::standards`]), and `StateBuilder::magic` and
+//!   [`super::implements`] check the magic again for their `S`. A standard
+//!   hidden inside a hand-written group slot is the one case no type can
+//!   see; its block's `initial_state()` refuses it by name (see
+//!   `LedgerWidth`).
 //!
 //! A magic is a CLAIM, not proof: the deploy state is the deployer's, and a
 //! maintenance authority can install a circuit that writes `root[0]`.
@@ -81,8 +89,10 @@ use super::ledger::{BlockLayout, FieldPath, LedgerWidth, Placement};
 )]
 pub trait LedgerHeader: LedgerWidth {
     /// The discriminator at the first leaf (`[0]`, or `[0, 0]` for a
-    /// standard with fields). Not all zero — E0080 in the derive's
-    /// expansion.
+    /// standard with fields). Not all zero — E0080 wherever the standard is
+    /// used as one: its placement (`Placement::root_header`), its deploy
+    /// state (`StateBuilder::magic`), a reader's `implements`, and the
+    /// derive's own check.
     const MAGIC: [u8; 32];
 }
 
@@ -118,10 +128,18 @@ pub struct Magic {
 }
 
 impl Magic {
-    /// The magic at `path` — `[0]` or `[0, 0]`. For the derive's
-    /// expansion, not for call sites.
+    /// The magic at `path` — `[0]` or `[0, 0]`, and nowhere else: a
+    /// standard is `root[0]`, a Cell there or an Array whose entry 0 is the
+    /// magic. For the derive's expansion (and a hand-written standard's
+    /// `magic()`), not for call sites. E0080 in a `const`, a panic naming
+    /// the rule otherwise.
     #[doc(hidden)]
     pub const fn at_path(path: &[u8]) -> Self {
+        assert!(
+            matches!(path, [0] | [0, 0]),
+            "a standard's magic is at [0] (a magic-only standard) or [0, 0] (one with fields): \
+             a standard claims root[0], and its magic is the first leaf there"
+        );
         Magic {
             path: FieldPath::of(path),
         }
@@ -158,7 +176,9 @@ pub(super) mod sealed {
 )]
 pub trait HeaderField: LedgerWidth + sealed::HeaderField {}
 
-/// `#[derive(LedgerHeader)]`'s magic check: E0080 on 32 zero bytes.
+/// The magic check: E0080 on 32 zero bytes. `#[derive(LedgerHeader)]`
+/// emits it, and `Placement::root_header`, `StateBuilder::magic` and
+/// `implements` run it on their standard in an inline `const`.
 #[doc(hidden)]
 pub const fn assert_magic(magic: &[u8; 32]) {
     let mut i = 0;
@@ -196,7 +216,7 @@ pub const fn assert_header_fields(widths: &[usize], kinds: &[&[u8]], placements:
              the block's Signet, which lives in the body"
         );
         assert!(
-            matches!(placements[i], Placement::Body),
+            !placements[i].is_root_header(),
             "a standard cannot contain another standard: root[0] has one owner"
         );
         i += 1;

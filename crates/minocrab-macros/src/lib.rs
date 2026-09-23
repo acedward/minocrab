@@ -170,7 +170,9 @@ pub fn derive_ledger(input: TokenStream) -> TokenStream {
 }
 
 /// Derive a STANDARD's slot side: `LedgerWidth` with `WIDTH = 0` and
-/// `PLACEMENT = RootHeader`, `at_layout`, `magic()`, and the compile-time
+/// `PLACEMENT = Placement::root_header::<Self>()`, `at_layout`, `magic()`,
+/// the deploy state (`InitialState`: the magic, then the fields), and the
+/// compile-time
 /// checks (a non-zero magic; at most 15 named fields, each a single-field
 /// std slot). The magic itself is the hand-written
 /// `impl LedgerHeader for T { const MAGIC: [u8; 32] = pad32(b"…"); }`.

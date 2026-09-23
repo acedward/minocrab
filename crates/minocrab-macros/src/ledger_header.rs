@@ -18,7 +18,7 @@
 //! ```ignore
 //! impl S::LedgerWidth for Versioned {
 //!     const WIDTH: usize = 0;
-//!     const PLACEMENT: S::Placement = S::Placement::RootHeader;
+//!     const PLACEMENT: S::Placement = S::Placement::root_header::<Versioned>();
 //! }
 //! impl Versioned {
 //!     pub const fn at_layout(layout: S::BlockLayout, _start: usize) -> Self {
@@ -32,7 +32,7 @@
 //! }
 //! impl S::InitialState for Versioned {
 //!     fn contribute(&self, state: &mut S::StateBuilder) {
-//!         state.magic(self.magic(), &<Versioned as S::LedgerHeader>::MAGIC);
+//!         state.magic::<Versioned>(self.magic());
 //!         S::InitialState::contribute(&self.version, state);
 //!         S::InitialState::contribute(&self.admin, state);
 //!     }
@@ -47,7 +47,9 @@
 //!
 //! WIDTH ZERO is the whole layout story: `#[derive(Ledger)]`'s width sums
 //! leave the standard out, so its body is laid out as if it were absent,
-//! and `PLACEMENT = RootHeader` is what makes that block's layout headed.
+//! and `PLACEMENT = Placement::root_header::<Self>()` is what makes that
+//! block's layout headed — the one way to say it, which also checks the
+//! magic, so a hand-written standard is held to the same rules.
 //! The header's own paths do not depend on the block at all — a standard
 //! is at `root[0]` in every contract — so `at_layout` ignores `start`.
 //!
@@ -63,6 +65,7 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Fields};
 
 /// The most named fields a standard may have: the header is one Array at
@@ -128,10 +131,11 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                          ledger's Array bound is sixteen",
                     ));
                 }
+                // `unraw`: `r#magic` is the same name.
                 if let Some(magic) = named
                     .named
                     .iter()
-                    .find(|f| f.ident.as_ref().is_some_and(|i| i == "magic"))
+                    .find(|f| f.ident.as_ref().is_some_and(|i| i.unraw() == "magic"))
                 {
                     return Err(syn::Error::new_spanned(
                         magic,
@@ -190,10 +194,11 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
 
     Ok(quote! {
         // WIDTH 0: the block's body sums leave the standard out.
-        // RootHeader: the block's layout is headed, root[0] is this.
+        // root_header: the block's layout is headed, root[0] is this (and
+        // the magic is checked, E0080 on zero).
         impl #width for #name {
             const WIDTH: usize = 0;
-            const PLACEMENT: #s::Placement = #s::Placement::RootHeader;
+            const PLACEMENT: #s::Placement = #s::Placement::root_header::<#name>();
         }
 
         impl #name {
@@ -215,7 +220,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         // `set` refuses it), then each field's default at `[0, i + 1]`.
         impl #s::InitialState for #name {
             fn contribute(&self, state: &mut #s::StateBuilder) {
-                state.magic(self.magic(), &<#name as #s::LedgerHeader>::MAGIC);
+                state.magic::<#name>(self.magic());
                 #( #s::InitialState::contribute(&self.#field_idents, state); )*
             }
         }
@@ -256,7 +261,7 @@ mod tests {
         assert!(expanded.contains("const WIDTH : usize = 0"), "{expanded}");
         assert!(
             expanded.contains(
-                "const PLACEMENT : :: minocrab_std :: v3 :: Placement = :: minocrab_std :: v3 :: Placement :: RootHeader"
+                "const PLACEMENT : :: minocrab_std :: v3 :: Placement = :: minocrab_std :: v3 :: Placement :: root_header :: < Mip0099 > ()"
             ),
             "{expanded}"
         );
@@ -312,9 +317,7 @@ mod tests {
     fn the_standard_contributes_its_magic_then_its_fields() {
         let unit = expansion(syn::parse_quote! { struct Mip0099; });
         assert!(
-            unit.contains(
-                "state . magic (self . magic () , & < Mip0099 as :: minocrab_std :: v3 :: LedgerHeader > :: MAGIC) ;"
-            ),
+            unit.contains("state . magic :: < Mip0099 > (self . magic ()) ;"),
             "{unit}"
         );
         assert!(!unit.contains("InitialState :: contribute"), "{unit}");
@@ -324,7 +327,9 @@ mod tests {
                 admin: LedgerCell<B32<Public>>,
             }
         });
-        let magic = named.find("state . magic (").expect("the magic");
+        let magic = named
+            .find("state . magic :: < Versioned > (self . magic ())")
+            .expect("the magic");
         let version = named
             .find(
                 ":: minocrab_std :: v3 :: InitialState :: contribute (& self . version , state) ;",
@@ -360,7 +365,8 @@ mod tests {
         );
     }
 
-    /// `magic` is not a field name a standard may use.
+    /// `magic` is not a field name a standard may use — nor `r#magic`,
+    /// the same name raw.
     #[test]
     fn a_field_named_magic_is_rejected() {
         let error = expand(syn::parse_quote! {
@@ -370,6 +376,14 @@ mod tests {
         assert!(
             error.to_string().contains("the magic is not a field"),
             "{error}"
+        );
+        let raw = expand(syn::parse_quote! {
+            struct S { version: LedgerCounter, r#magic: LedgerCell<B32<Public>> }
+        })
+        .expect_err("an `r#magic` field is rejected");
+        assert!(
+            raw.to_string().contains("the magic is not a field"),
+            "{raw}"
         );
     }
 

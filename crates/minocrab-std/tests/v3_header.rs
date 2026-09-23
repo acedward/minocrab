@@ -51,11 +51,16 @@ impl LedgerHeader for Versioned {
 #[test]
 fn a_standard_is_width_zero_at_the_root() {
     assert_eq!(<Mip0099 as LedgerWidth>::WIDTH, 0);
-    assert_eq!(<Mip0099 as LedgerWidth>::PLACEMENT, Placement::RootHeader);
+    assert_eq!(
+        <Mip0099 as LedgerWidth>::PLACEMENT,
+        Placement::root_header::<Mip0099>()
+    );
+    assert!(<Mip0099 as LedgerWidth>::PLACEMENT.is_root_header());
     assert!(<Mip0099 as LedgerWidth>::KINDS.is_empty());
     assert_eq!(<Versioned as LedgerWidth>::WIDTH, 0);
-    assert_eq!(<Versioned as LedgerWidth>::PLACEMENT, Placement::RootHeader);
-    assert_eq!(<LedgerField as LedgerWidth>::PLACEMENT, Placement::Body);
+    assert!(<Versioned as LedgerWidth>::PLACEMENT.is_root_header());
+    assert_eq!(<LedgerField as LedgerWidth>::PLACEMENT, Placement::BODY);
+    assert!(!Placement::BODY.is_root_header());
     assert_eq!(
         <Mip0099 as LedgerHeader>::MAGIC[..26],
         *b"mip-0099:ledger-header[v1]"

@@ -9,8 +9,11 @@
 //! computes, flat and segmented, and nothing here re-derives them.
 //!
 //! Also here: the builder's own rules (the skeleton's lengths, Null for an
-//! untyped field, the header's two shapes, the empty block) and every
-//! refusal of `StateBuilder::set`.
+//! untyped field, the header's two shapes, the empty block), every refusal
+//! of `StateBuilder::set` (the Array slots' shapes included), and the
+//! magic's own rules for slot types written BY HAND: a magic only at `[0]`
+//! or `[0, 0]`, one per state, present exactly when the block embeds a
+//! standard — so a standard hidden in a group slot is refused by name.
 //!
 //! What this file cannot see is compactc's JAVASCRIPT: a curve point's Compact
 //! default is its identity, not the zero limbs a circuit default pushes, and
@@ -23,12 +26,15 @@ use midnight_storage::db::InMemoryDB;
 use midnight_storage::storage::Array;
 use minocrab::v3::{Circuit3, Compiled3};
 use minocrab::{AlignmentAtom, Public};
-use minocrab_ledger::{cell_write_at, default_value, emit, stored_cell, LedgerKey};
+use minocrab_ledger::{
+    cell_write_at, default_value, emit, empty_list, empty_merkle_tree_value,
+    historic_merkle_tree_reset_value, stored_cell, LedgerKey,
+};
 use minocrab_sim::v3::exec::{self, Call};
 use minocrab_std::v3::{
-    pad32, Bool, FieldPath, Ledger, LedgerCell, LedgerCounter, LedgerField, LedgerHeader,
-    LedgerHistoricMerkleTree, LedgerList, LedgerMap, LedgerMerkleTree, LedgerRepr, LedgerSet,
-    StateBuilder, Uint, B32,
+    pad32, BlockLayout, Bool, FieldPath, InitialState, Ledger, LedgerCell, LedgerCounter,
+    LedgerField, LedgerHeader, LedgerHistoricMerkleTree, LedgerList, LedgerMap, LedgerMerkleTree,
+    LedgerRepr, LedgerSet, LedgerWidth, Magic, Placement, StateBuilder, Uint, B32,
 };
 
 type U64 = Uint<64, Public>;
@@ -421,4 +427,202 @@ fn the_order_of_contributions_does_not_matter() {
     assert_eq!(array_len(at(&built, &[0])), 1);
     assert_eq!(array_len(at(&built, &[1])), 4);
     assert!(*at(&built, &[1, 0]) == StateValue::Null);
+}
+
+// ---- the Array slots' shapes (`set`) ------------------------------------------------
+
+/// A List slot takes a PUSHED list — `[head, the rest, length]` — as well
+/// as an empty one, and keeps taking one after it was replaced.
+#[test]
+fn set_takes_a_pushed_list_for_a_list() {
+    let u64_cell = |v: u64| stored_cell(U64::atoms(), vec![v.to_le_bytes().to_vec()]);
+    let pushed = StateValue::Array(Array::from(vec![u64_cell(9), empty_list(), u64_cell(1)]));
+    let mut state = Every::initial_state();
+    state
+        .set(EVERY.list.field_path(), pushed.clone())
+        .set(EVERY.list.field_path(), empty_list())
+        .set(EVERY.list.field_path(), pushed.clone());
+    assert!(*state.get(EVERY.list.field_path()).expect("declared") == pushed);
+    // The trees take their own shape back.
+    state
+        .set(EVERY.tree.field_path(), empty_merkle_tree_value(10))
+        .set(
+            EVERY.history.field_path(),
+            historic_merkle_tree_reset_value(10),
+        );
+}
+
+#[test]
+#[should_panic(expected = "is not the slot's shape")]
+fn set_refuses_an_empty_array_for_a_list() {
+    Every::initial_state().set(
+        EVERY.list.field_path(),
+        StateValue::Array(Array::from(Vec::<StateValue<InMemoryDB>>::new())),
+    );
+}
+
+#[test]
+#[should_panic(expected = "is not the slot's shape")]
+fn set_refuses_a_list_for_a_merkle_tree() {
+    Every::initial_state().set(EVERY.tree.field_path(), empty_list());
+}
+
+#[test]
+#[should_panic(expected = "is not the slot's shape")]
+fn set_refuses_a_tree_of_another_height() {
+    Every::initial_state().set(EVERY.tree.field_path(), empty_merkle_tree_value(11));
+}
+
+#[test]
+#[should_panic(expected = "is not the slot's shape")]
+fn set_refuses_a_merkle_tree_for_a_historic_one() {
+    Every::initial_state().set(EVERY.history.field_path(), empty_merkle_tree_value(10));
+}
+
+#[test]
+#[should_panic(expected = "is not the slot's shape")]
+fn set_refuses_a_historic_tree_for_a_list() {
+    Every::initial_state().set(
+        EVERY.list.field_path(),
+        historic_merkle_tree_reset_value(10),
+    );
+}
+
+// ---- the magic's rules, for slot types written by hand --------------------------------
+
+/// A magic is at `[0]` or `[0, 0]`: no `Magic` handle names another path.
+#[test]
+#[should_panic(expected = "a standard's magic is at [0] (a magic-only standard) or [0, 0]")]
+fn a_magic_elsewhere_is_refused() {
+    let _ = Magic::at_path(std::hint::black_box(&[5]));
+}
+
+#[test]
+#[should_panic(expected = "a standard's magic is at [0] (a magic-only standard) or [0, 0]")]
+fn a_magic_deeper_is_refused() {
+    let _ = Magic::at_path(std::hint::black_box(&[0, 0, 0]));
+}
+
+/// One magic per state: the second is the one-standard rule, named.
+#[test]
+#[should_panic(expected = "one standard per ledger block")]
+fn a_second_magic_is_refused() {
+    let mut state = StateBuilder::new();
+    state.magic::<Mip0099>(Magic::at_path(&[0]));
+    state.magic::<Mip0099>(Magic::at_path(&[0, 0]));
+}
+
+/// A derived standard built inside a hand-written group slot: the derive
+/// sees the block's own fields only, so it is not counted — and in a block
+/// with a standard of its own it would be a second owner of `root[0]`.
+#[derive(LedgerHeader)]
+struct Inner;
+
+impl LedgerHeader for Inner {
+    const MAGIC: [u8; 32] = pad32(b"inner");
+}
+
+struct Smuggler {
+    inner: Inner,
+    x: LedgerCell<U64>,
+}
+
+impl LedgerWidth for Smuggler {}
+
+impl Smuggler {
+    const fn at_layout(layout: BlockLayout, start: usize) -> Self {
+        Smuggler {
+            inner: Inner::at_layout(layout, start),
+            x: LedgerCell::at_layout(layout, start),
+        }
+    }
+}
+
+impl InitialState for Smuggler {
+    fn contribute(&self, state: &mut StateBuilder) {
+        self.inner.contribute(state);
+        self.x.contribute(state);
+    }
+}
+
+#[derive(Ledger)]
+struct TwoStandards {
+    std: Mip0099,
+    group: Smuggler,
+}
+
+#[test]
+#[should_panic(expected = "one standard per ledger block")]
+fn a_standard_hidden_in_a_group_slot_is_refused_by_name() {
+    // Both handles are root[0]: the layout cannot tell them apart…
+    let block = TwoStandards::new();
+    assert_eq!(block.std.magic().field_path().as_slice(), &[0]);
+    assert_eq!(block.group.inner.magic().field_path().as_slice(), &[0]);
+    assert_eq!(block.group.x.field_path().as_slice(), &[1]);
+    // …and the deploy state refuses the second, naming the rule.
+    TwoStandards::initial_state();
+}
+
+/// A hand-written standard whose deploy state forgets its magic.
+struct Silent;
+
+impl LedgerWidth for Silent {
+    const WIDTH: usize = 0;
+    const PLACEMENT: Placement = Placement::root_header::<Silent>();
+}
+
+impl LedgerHeader for Silent {
+    const MAGIC: [u8; 32] = pad32(b"silent");
+}
+
+impl Silent {
+    const fn at_layout(_layout: BlockLayout, _start: usize) -> Self {
+        Silent
+    }
+}
+
+impl InitialState for Silent {
+    fn contribute(&self, _state: &mut StateBuilder) {}
+}
+
+#[derive(Ledger)]
+struct SilentHeaded {
+    a: LedgerCell<U64>,
+    std: Silent,
+}
+
+#[test]
+#[should_panic(expected = "this block embeds 1 and its slots wrote 0")]
+fn a_headed_block_without_its_magic_is_refused() {
+    // Headed all the same: the placement says so.
+    assert_eq!(SilentHeaded::new().a.field_path().as_slice(), &[1]);
+    SilentHeaded::initial_state();
+}
+
+/// A BODY slot that writes a magic: a claim without a standard.
+struct Claimer;
+
+impl LedgerWidth for Claimer {}
+
+impl Claimer {
+    const fn at_layout(_layout: BlockLayout, _start: usize) -> Self {
+        Claimer
+    }
+}
+
+impl InitialState for Claimer {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.magic::<Mip0099>(Magic::at_path(&[0]));
+    }
+}
+
+#[derive(Ledger)]
+struct Claims {
+    claimer: Claimer,
+}
+
+#[test]
+#[should_panic(expected = "this block embeds 0 and its slots wrote 1")]
+fn a_body_slot_that_writes_a_magic_is_refused() {
+    Claims::initial_state();
 }

@@ -20,10 +20,11 @@
 //!     pub const fn new() -> Self {
 //!         const __TOTAL: usize = 0usize + <LedgerMap<B32<Public>, VaultRecord> as W>::WIDTH
 //!             + <LedgerField as W>::WIDTH + <LedgerCounter as W>::WIDTH;
-//!         const __HEADERS: usize = ::minocrab_std::v3::standards(&[
-//!             <LedgerMap<B32<Public>, VaultRecord> as W>::PLACEMENT,
-//!             <LedgerField as W>::PLACEMENT, <LedgerCounter as W>::PLACEMENT,
-//!         ]);
+//!         const __HEADERS: usize = ::minocrab_std::v3::standards(
+//!             &[<LedgerMap<B32<Public>, VaultRecord> as W>::PLACEMENT,
+//!               <LedgerField as W>::PLACEMENT, <LedgerCounter as W>::PLACEMENT],
+//!             &[<LedgerMap<B32<Public>, VaultRecord> as W>::WIDTH, …],
+//!         );
 //!         const __LAYOUT: ::minocrab_std::v3::BlockLayout =
 //!             ::minocrab_std::v3::BlockLayout::of_block(__TOTAL, __HEADERS);
 //!         Vault {
@@ -37,16 +38,18 @@
 //! impl Vault {
 //!     pub fn initial_state() -> ::minocrab_std::v3::StateBuilder {
 //!         const __BLOCK: Vault = Vault::new();
+//!         const __HEADERS: usize = /* as in `new` */;
 //!         let mut __state = ::minocrab_std::v3::StateBuilder::new();
 //!         ::minocrab_std::v3::InitialState::contribute(&__BLOCK.sign_bidirectional_event_map, &mut __state);
 //!         ::minocrab_std::v3::InitialState::contribute(&__BLOCK.signet_signer, &mut __state);
 //!         ::minocrab_std::v3::InitialState::contribute(&__BLOCK.signet_request_nonce, &mut __state);
+//!         ::minocrab_std::v3::__derive::assert_magics(&__state, __HEADERS);
 //!         __state
 //!     }
 //! }
 //! impl Default for Vault { fn default() -> Self { Self::new() } }
 //! const _: () = ::minocrab_std::v3::assert_distinct_kinds(&[<… as W>::KINDS, …]);
-//! const _: usize = ::minocrab_std::v3::standards(&[<… as W>::PLACEMENT, …]);
+//! const _: usize = ::minocrab_std::v3::standards(&[<… as W>::PLACEMENT, …], &[<… as W>::WIDTH, …]);
 //! ```
 //!
 //! — nothing but width sums, placements and constructor calls, which is the
@@ -62,11 +65,12 @@
 //! a nested write. See [`field_paths`], which is that pass transcribed.
 //!
 //! A STANDARD (`#[derive(LedgerHeader)]`, notes/ledger-header.org) is a
-//! field whose type says `PLACEMENT = RootHeader` and `WIDTH = 0`: the width
-//! sums skip it, so the body is laid out as if it were absent, and
-//! `__HEADERS = 1` makes `__LAYOUT` headed — the body moved one root slot
-//! along, `root[0]` the standard's — wherever in the struct it is declared.
-//! Two standards are E0080 (one standard per ledger block). Nothing here
+//! field whose type says `PLACEMENT = Placement::root_header::<S>()` and
+//! `WIDTH = 0`: the width sums skip it, so the body is laid out as if it
+//! were absent, and `__HEADERS = 1` makes `__LAYOUT` headed — the body
+//! moved one root slot along, `root[0]` the standard's — wherever in the
+//! struct it is declared. Two standards are E0080 (one standard per ledger
+//! block), and so is a standard whose `WIDTH` is not zero. Nothing here
 //! looks for a standard by name: the type decides, as the owner of the
 //! standard intends.
 //!
@@ -136,8 +140,10 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let total = quote!(0usize #( + <#types as #width>::WIDTH )*);
     // …and whether the block carries a standard is a sum too: each slot
     // type says where it sits (`LedgerWidth::PLACEMENT`), and `standards`
-    // counts the `RootHeader`s — E0080 above one.
+    // counts the root headers — E0080 above one, or for one whose `WIDTH`
+    // is not zero.
     let placements = quote!(&[ #( <#types as #width>::PLACEMENT ),* ]);
+    let widths = quote!(&[ #( <#types as #width>::WIDTH ),* ]);
 
     // THE SIGNET BLOCK, THREADED (M37 rung B, notes/evm-calls.org §3). An
     // `evm_flow::Pending` slot reads the contract's Signet configuration —
@@ -204,7 +210,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             /// costs nothing at run time.
             pub const fn new() -> Self {
                 const __TOTAL: usize = #total;
-                const __HEADERS: usize = ::minocrab_std::v3::standards(#placements);
+                const __HEADERS: usize = ::minocrab_std::v3::standards(#placements, #widths);
                 const __LAYOUT: ::minocrab_std::v3::BlockLayout =
                     ::minocrab_std::v3::BlockLayout::of_block(__TOTAL, __HEADERS);
                 #name { #(#inits),* }
@@ -218,9 +224,12 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             /// Null), then `build`.
             pub fn initial_state() -> ::minocrab_std::v3::StateBuilder {
                 const __BLOCK: #name = #name::new();
+                const __HEADERS: usize = ::minocrab_std::v3::standards(#placements, #widths);
                 #[allow(unused_mut)]
                 let mut __state = ::minocrab_std::v3::StateBuilder::new();
                 #( ::minocrab_std::v3::InitialState::contribute(&__BLOCK.#idents, &mut __state); )*
+                // A standard's magic is there exactly when the block has one.
+                ::minocrab_std::v3::__derive::assert_magics(&__state, __HEADERS);
                 __state
             }
         }
@@ -241,9 +250,10 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         ]);
 
         // One standard per ledger block (E0080 if two fields claim
-        // `root[0]`), checked here as well as in `new`, so the rule holds
-        // for a block whose constructor is never evaluated.
-        const _: usize = ::minocrab_std::v3::standards(#placements);
+        // `root[0]`, or one claims it with a nonzero width), checked here as
+        // well as in `new`, so the rule holds for a block whose constructor
+        // is never evaluated.
+        const _: usize = ::minocrab_std::v3::standards(#placements, #widths);
     })
 }
 
@@ -493,7 +503,7 @@ mod tests {
                 initialized: LedgerCounter,
             }
         });
-        let placements = "& [< LedgerMap < B32 < Public > , VaultRecord > as :: minocrab_std :: v3 :: LedgerWidth > :: PLACEMENT , < LedgerCounter as :: minocrab_std :: v3 :: LedgerWidth > :: PLACEMENT]";
+        let placements = "& [< LedgerMap < B32 < Public > , VaultRecord > as :: minocrab_std :: v3 :: LedgerWidth > :: PLACEMENT , < LedgerCounter as :: minocrab_std :: v3 :: LedgerWidth > :: PLACEMENT] , & [< LedgerMap < B32 < Public > , VaultRecord > as :: minocrab_std :: v3 :: LedgerWidth > :: WIDTH , < LedgerCounter as :: minocrab_std :: v3 :: LedgerWidth > :: WIDTH]";
         assert!(
             expanded.contains(&format!(
                 "const __HEADERS : usize = :: minocrab_std :: v3 :: standards ({placements})"
@@ -583,6 +593,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("{call} in order:\n{expanded}"));
             at += found + call.len();
         }
+        // …then one check that a standard's magic is there exactly when the
+        // block has a standard.
+        let check = ":: minocrab_std :: v3 :: __derive :: assert_magics (& __state , __HEADERS) ;";
+        assert!(expanded[at..].contains(check), "{expanded}");
         assert!(!expanded.contains("Circuit3"), "{expanded}");
     }
 

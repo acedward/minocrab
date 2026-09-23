@@ -45,7 +45,7 @@ use midnight_onchain_state::state::{ContractState, StateValue};
 use midnight_storage::db::{InMemoryDB, DB};
 use minocrab::{AlignmentAtom, AlignmentSegment};
 
-use super::header::LedgerHeader;
+use super::header::{assert_magic, LedgerHeader};
 use super::ledger::MAX_FIELD_PATH;
 
 /// The most index-0 steps the reader takes — FROZEN at three as part of the
@@ -138,6 +138,11 @@ pub fn contract_state_discriminator(bytes: &[u8]) -> std::io::Result<Option<[u8;
 ///
 /// True means the contract CLAIMS the standard (see the module docs), not
 /// that it implements it.
+///
+/// `S::MAGIC` all zero is E0080 here too, however `S` was written: 32 zero
+/// bytes are what a never-written `Bytes<32>` first field holds, so such an
+/// `S` would be "implemented" by every contract that starts with one.
 pub fn implements<S: LedgerHeader>(state: &StateValue<impl DB>) -> bool {
+    const { assert_magic(&S::MAGIC) };
     discriminator(state) == Some(S::MAGIC)
 }

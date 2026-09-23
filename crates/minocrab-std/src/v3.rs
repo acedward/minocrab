@@ -18,6 +18,7 @@ use minocrab::{Alignment, AlignmentAtom, AlignmentSegment, Fr, Meet, Private, Pu
 #[doc(hidden)]
 pub mod __derive {
     pub use super::header::{assert_headed, assert_header_fields, assert_magic, header_field};
+    pub use super::state::assert_magics;
     pub use super::{repr_limbs, LedgerRepr, ProofWires};
     pub use minocrab::v3::{Circuit3, FieldT, Val, Wire3};
     pub use minocrab::{AlignmentAtom, Public};
@@ -212,10 +213,11 @@ pub use minocrab_macros::LedgerRepr;
 
 /// `#[derive(LedgerHeader)]` — a unit struct or a struct of single-field
 /// ledger slots becomes a STANDARD: `LedgerWidth::WIDTH = 0`,
-/// `PLACEMENT = RootHeader`, an `at_layout` constructor, a `magic()` handle
-/// and the compile-time checks. The derive and the trait share the name, as
-/// `LedgerRepr`'s do; the magic itself is written in `impl LedgerHeader`
-/// (see [`LedgerHeader`]).
+/// `PLACEMENT = Placement::root_header::<Self>()`, an `at_layout`
+/// constructor, a `magic()` handle, its deploy state and the compile-time
+/// checks. The derive and the trait share the name, as `LedgerRepr`'s do;
+/// the magic itself is written in `impl LedgerHeader` (see
+/// [`LedgerHeader`]).
 ///
 /// A standard with fields is one Array at `root[0]`: the magic at `[0, 0]`,
 /// field `i` at `[0, i + 1]`, and the contract's own fields keep compactc's
@@ -374,6 +376,130 @@ pub use minocrab_macros::LedgerRepr;
 /// struct Outer { inner: Inner }
 /// impl LedgerHeader for Outer { const MAGIC: [u8; 32] = pad32(b"outer"); }
 /// ```
+///
+/// The derive WITHOUT `impl LedgerHeader` — E0277, "`X` is laid out as a
+/// ledger standard but names no magic":
+///
+/// ```compile_fail
+/// use minocrab_std::v3::LedgerHeader;
+///
+/// #[derive(LedgerHeader)]
+/// struct Nameless;
+/// ```
+///
+/// THE SAME RULES HOLD FOR A STANDARD WRITTEN BY HAND. `LedgerWidth` is an
+/// ordinary trait, but its `PLACEMENT` can say "root header" only as
+/// `Placement::root_header::<S>()`, which names a `LedgerHeader` and checks
+/// its magic, and `#[derive(Ledger)]` checks the rest. A hand-written
+/// standard that follows them compiles and is laid out like a derived one:
+///
+/// ```
+/// use minocrab_std::v3::{
+///     discriminator, pad32, BlockLayout, InitialState, Ledger, LedgerCounter, LedgerHeader,
+///     LedgerWidth, Magic, Placement, StateBuilder,
+/// };
+///
+/// struct Hand;
+/// impl LedgerWidth for Hand {
+///     const WIDTH: usize = 0;
+///     const PLACEMENT: Placement = Placement::root_header::<Hand>();
+/// }
+/// impl LedgerHeader for Hand { const MAGIC: [u8; 32] = pad32(b"hand"); }
+/// impl Hand {
+///     const fn at_layout(_layout: BlockLayout, _start: usize) -> Self { Hand }
+///     const fn magic(&self) -> Magic { Magic::at_path(&[0]) }
+/// }
+/// impl InitialState for Hand {
+///     fn contribute(&self, state: &mut StateBuilder) { state.magic::<Hand>(self.magic()); }
+/// }
+///
+/// #[derive(Ledger)]
+/// struct Block { n: LedgerCounter, std: Hand }
+/// const BLOCK: Block = Block::new();
+/// assert_eq!(BLOCK.n.index(), 1);
+/// assert_eq!(discriminator(&Block::initial_state().build()), Some(Hand::MAGIC));
+/// ```
+///
+/// A root header WITHOUT a standard behind it — E0277, "names no magic":
+///
+/// ```compile_fail
+/// use minocrab_std::v3::{
+///     BlockLayout, InitialState, Ledger, LedgerCounter, LedgerWidth, Placement, StateBuilder,
+/// };
+///
+/// struct Fake;
+/// impl LedgerWidth for Fake {
+///     const WIDTH: usize = 0;
+///     const PLACEMENT: Placement = Placement::root_header::<Fake>();
+/// }
+/// impl Fake { const fn at_layout(_layout: BlockLayout, _start: usize) -> Self { Fake } }
+/// impl InitialState for Fake { fn contribute(&self, _state: &mut StateBuilder) {} }
+///
+/// #[derive(Ledger)]
+/// struct Block { n: LedgerCounter, std: Fake }
+/// ```
+///
+/// A hand-written ALL-ZERO MAGIC — E0080, "a standard's MAGIC is all zero
+/// bytes", from its placement:
+///
+/// ```compile_fail
+/// use minocrab_std::v3::{
+///     BlockLayout, InitialState, Ledger, LedgerCounter, LedgerHeader, LedgerWidth, Placement,
+///     StateBuilder,
+/// };
+///
+/// struct Zero;
+/// impl LedgerWidth for Zero {
+///     const WIDTH: usize = 0;
+///     const PLACEMENT: Placement = Placement::root_header::<Zero>();
+/// }
+/// impl LedgerHeader for Zero { const MAGIC: [u8; 32] = [0; 32]; }
+/// impl Zero { const fn at_layout(_layout: BlockLayout, _start: usize) -> Self { Zero } }
+/// impl InitialState for Zero { fn contribute(&self, _state: &mut StateBuilder) {} }
+///
+/// #[derive(Ledger)]
+/// struct Block { std: Zero, n: LedgerCounter }
+/// ```
+///
+/// …and from a reader's `implements`, whatever the type's placement (32
+/// zero bytes are what a never-written `Bytes<32>` first field holds):
+///
+/// ```compile_fail
+/// use minocrab_std::v3::{implements, LedgerHeader, LedgerWidth, StateBuilder};
+///
+/// struct ZeroClaim;
+/// impl LedgerWidth for ZeroClaim {}
+/// impl LedgerHeader for ZeroClaim { const MAGIC: [u8; 32] = [0; 32]; }
+///
+/// let _ = implements::<ZeroClaim>(&StateBuilder::new().build());
+/// ```
+///
+/// A root header that also takes a BODY FIELD (`WIDTH != 0`) — E0080, "a
+/// standard occupies no body field":
+///
+/// ```compile_fail
+/// use minocrab_std::v3::{
+///     pad32, BlockLayout, InitialState, Ledger, LedgerCounter, LedgerHeader, LedgerWidth,
+///     Placement, StateBuilder,
+/// };
+///
+/// struct Wide;
+/// impl LedgerWidth for Wide {
+///     const WIDTH: usize = 1;
+///     const PLACEMENT: Placement = Placement::root_header::<Wide>();
+/// }
+/// impl LedgerHeader for Wide { const MAGIC: [u8; 32] = pad32(b"wide"); }
+/// impl Wide { const fn at_layout(_layout: BlockLayout, _start: usize) -> Self { Wide } }
+/// impl InitialState for Wide { fn contribute(&self, _state: &mut StateBuilder) {} }
+///
+/// #[derive(Ledger)]
+/// struct Block { std: Wide, n: LedgerCounter }
+/// ```
+///
+/// A standard hidden inside a hand-written GROUP SLOT is the one case the
+/// types cannot see (the derive counts the block's own fields): the
+/// block's `initial_state()` refuses it at run time, naming the
+/// one-standard rule (see `LedgerWidth`).
 #[cfg(feature = "macros")]
 pub use minocrab_macros::LedgerHeader;
 
