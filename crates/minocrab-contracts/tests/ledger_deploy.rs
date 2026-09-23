@@ -21,8 +21,17 @@
 //!   for byte (`tests/fixtures/initial_state/*.state.hex`, produced in node
 //!   by project 00002's JS oracle; provenance in each file's header): one
 //!   field of every ledger type (`e_adts`), the shipped `Adts` contract, and
-//!   the magic-first probes of 16 and 226 fields — whose magic a Compact
+//!   the magic-first probes of 1, 16 and 226 fields — whose magic a Compact
 //!   CONSTRUCTOR writes, reproduced here with `StateBuilder::set`.
+//! - **T5, the reader** (spec 00002 FR-008, SC-004; `v3::discriminator`).
+//!   On the SERIALIZED, tagged `ContractState` of every T4 block as the
+//!   ledger holds it after the deploy, it returns the standard's magic
+//!   (and still does after every T4 circuit). On compactc's own serialized
+//!   initial states of the magic-first probes — the magic at `[0]`, `[0, 0]`,
+//!   `[0, 0, 0]` — and on their deployed minocrab twins, it returns the
+//!   magic; on compactc's `Adts` (a Counter first) `None`; on bytes that are
+//!   not a `ContractState` (truncated, trailing bytes, another tag) `Err`.
+//!   The rule's shapes one by one are minocrab-std's `tests/v3_discriminator.rs`.
 //!
 //! Also: the composite slots' shares of a headed block's state (a Signet and
 //! a Pending; an Outbox), deployed.
@@ -35,7 +44,9 @@ mod blocks;
 #[path = "ledger_deploy/deploy.rs"]
 mod deploy;
 
-use midnight_onchain_state::state::StateValue;
+use midnight_onchain_state::state::{
+    ContractMaintenanceAuthority, ContractOperation, ContractState, EntryPointBuf, StateValue,
+};
 use midnight_storage::db::InMemoryDB;
 use midnight_storage::storage::HashMap as StorageHashMap;
 use minocrab::v3::{Circuit3, Compiled3};
@@ -50,6 +61,8 @@ use minocrab_std::v3::{
     LedgerHeader, LedgerHistoricMerkleTree, LedgerList, LedgerMap, LedgerMerkleTree, LedgerRepr,
     LedgerSet, Maybe, MerkleTreeDigest, Opaque, Secp256k1Point, StateBuilder, Uint, B32,
 };
+// The reader (T5).
+use minocrab_std::v3::{contract_state_discriminator, discriminator, implements};
 
 pub type U64 = Uint<64, Public>;
 pub type U8 = Uint<8, Public>;
@@ -111,8 +124,8 @@ pub struct Case {
 const SIZES: [usize; 9] = [0, 1, 14, 15, 16, 30, 211, 225, 226];
 
 /// The magic-first probes of compactc (project 00002 P0b, Probe B) this file
-/// has non-headed twins for.
-const PROBES: [usize; 2] = [16, 226];
+/// has non-headed twins for: the magic at `[0]`, `[0, 0]` and `[0, 0, 0]`.
+const PROBES: [usize; 3] = [1, 16, 226];
 
 /// The type of own field `k` of `n`, by the probe rule above.
 fn body_type(k: usize, n: usize) -> &'static str {
@@ -451,6 +464,12 @@ fn t4_every_headed_block_deploys_and_its_writes_land_on_the_rule() {
                 magic_bytes,
                 "{name}: {what}: magic bit-identical"
             );
+            // T5: …so the reader still finds it.
+            assert_eq!(
+                discriminator(&post),
+                Some(magic_value),
+                "{name}: {what}: the reader after the circuit"
+            );
         };
         if let Some(first) = case.first {
             let cell = LedgerCell::<U64>::at_path(first.as_slice());
@@ -660,11 +679,16 @@ fn t4b_the_adts_contract_is_compactcs_initial_state() {
 }
 
 /// The magic-first probes: compactc's constructor writes
-/// `pad(32, "mip-0099:ledger-header[v1]")` at `[0, 0]` / `[0, 0, 0]`, the
-/// deployer's `set` does the same, and the segmented skeletons agree.
+/// `pad(32, "mip-0099:ledger-header[v1]")` at `[0]` / `[0, 0]` / `[0, 0, 0]`,
+/// the deployer's `set` does the same, and the segmented skeletons agree.
 #[test]
 fn t4b_the_magic_first_probes_are_compactcs_initial_state() {
     let magic = b32_cell(Mip0099::MAGIC);
+
+    let mut state = blocks::C1::initial_state();
+    state.set(blocks::C1::new().magic.field_path(), magic.clone());
+    assert_eq!(blocks::C1::new().magic.field_path().as_slice(), &[0]);
+    assert_oracle("b_n1", state.build());
 
     let mut state = blocks::C16::initial_state();
     state.set(blocks::C16::new().magic.field_path(), magic.clone());
@@ -678,4 +702,221 @@ fn t4b_the_magic_first_probes_are_compactcs_initial_state() {
         &[0, 0, 0]
     );
     assert_oracle("b_n226", state.build());
+}
+
+// ---- T5: the reader, on serialized states ------------------------------------------------
+
+/// The tag a serialized `ContractState` starts with on ledger 9.
+const CONTRACT_STATE_TAG: &[u8] = b"midnight:contract-state[v8]:";
+
+/// A whole `ContractState`, tagged and serialized — the bytes the node's
+/// `midnight_contractState` and the indexer's `state` field carry.
+fn contract_bytes(contract: &ContractState<InMemoryDB>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    midnight_serialize::tagged_serialize(contract, &mut bytes)
+        .expect("a contract state serializes");
+    bytes
+}
+
+/// Every T4 block, deployed, read back out of the ledger and serialized:
+/// the reader returns its standard's magic, at `[0]` (magic-only, declared
+/// first) and `[0, 0]` (multi-field, declared last), at every size.
+#[test]
+fn t5_the_reader_returns_every_deployed_standards_magic() {
+    let cases = blocks::cases();
+    assert_eq!(cases.len(), 2 * SIZES.len());
+    for case in cases {
+        let name = case.name;
+        let (magic, magic_only) = match case.standard {
+            Standard::Magic => (Mip0099::MAGIC, true),
+            Standard::Versioned => (Versioned::MAGIC, false),
+        };
+        let deployed = deploy::deploy((case.initial_state)().build());
+        let bytes = contract_bytes(&deployed.contract());
+        assert!(bytes.starts_with(CONTRACT_STATE_TAG), "{name}: tagged");
+        assert_eq!(
+            contract_state_discriminator(&bytes)
+                .expect("the ledger's own bytes are a ContractState"),
+            Some(magic),
+            "{name}: from the serialized state"
+        );
+        let data = deployed.data();
+        assert_eq!(
+            discriminator(&data),
+            Some(magic),
+            "{name}: from the StateValue"
+        );
+        assert_eq!(
+            implements::<Mip0099>(&data),
+            magic_only,
+            "{name}: implements Mip0099"
+        );
+        assert_eq!(
+            implements::<Versioned>(&data),
+            !magic_only,
+            "{name}: implements Versioned"
+        );
+    }
+}
+
+/// The reader reads `data` and nothing else: a state that also carries
+/// operations and another maintenance authority serializes to other bytes
+/// and reads the same.
+#[test]
+fn t5_the_reader_reads_the_data_alone() {
+    let data = blocks::cases()
+        .into_iter()
+        .find(|case| case.name == "H16V")
+        .map(|case| (case.initial_state)().build())
+        .expect("H16V is generated");
+    let mut operations = StorageHashMap::new();
+    for entry in ["setValue", "bump", "credit"] {
+        operations = operations.insert(
+            EntryPointBuf(entry.as_bytes().to_vec()),
+            ContractOperation::new(None, None),
+        );
+    }
+    let authority = ContractMaintenanceAuthority {
+        committee: vec![],
+        threshold: 0,
+        counter: 7,
+    };
+    let bytes = contract_bytes(&ContractState::new(data.clone(), operations, authority));
+    assert_ne!(bytes, deploy::data_only_bytes(data), "other bytes");
+    assert_eq!(
+        contract_state_discriminator(&bytes).expect("a ContractState"),
+        Some(Versioned::MAGIC)
+    );
+}
+
+/// compactc's magic-first contract — no minocrab standard, a `Bytes<32>`
+/// written first by its constructor — at 1, 16 and 226 fields: the magic at
+/// `[0]`, `[0, 0]`, `[0, 0, 0]`, the first leaf. Read from compactc's OWN
+/// serialized initial states (the T4b fixtures), and from minocrab's twins
+/// deployed and read back out of the ledger. Without the constructor's
+/// write, the first leaf is 32 zero bytes: a value, no standard's.
+#[test]
+fn t5_the_reader_finds_compactcs_magic_first_at_every_depth() {
+    let magic = b32_cell(Mip0099::MAGIC);
+    let probes: [(&str, fn() -> StateBuilder, FieldPath, &[u8]); 3] = [
+        (
+            "b_n1",
+            blocks::C1::initial_state,
+            blocks::C1::new().magic.field_path(),
+            &[0],
+        ),
+        (
+            "b_n16",
+            blocks::C16::initial_state,
+            blocks::C16::new().magic.field_path(),
+            &[0, 0],
+        ),
+        (
+            "b_n226",
+            blocks::C226::initial_state,
+            blocks::C226::new().magic.field_path(),
+            &[0, 0, 0],
+        ),
+    ];
+    for (name, initial_state, path, first_leaf) in probes {
+        assert_eq!(path.as_slice(), first_leaf, "{name}: the magic's path");
+
+        let theirs = oracle(name);
+        assert!(theirs.starts_with(CONTRACT_STATE_TAG), "{name}: tagged");
+        assert_eq!(
+            contract_state_discriminator(&theirs).expect("compactc's bytes are a ContractState"),
+            Some(Mip0099::MAGIC),
+            "{name}: compactc's own bytes"
+        );
+
+        let mut state = initial_state();
+        state.set(path, magic.clone());
+        let deployed = deploy::deploy(state.build());
+        assert_eq!(
+            contract_state_discriminator(&contract_bytes(&deployed.contract()))
+                .expect("a ContractState"),
+            Some(Mip0099::MAGIC),
+            "{name}: minocrab's twin, deployed"
+        );
+        assert!(
+            implements::<Mip0099>(&deployed.data()),
+            "{name}: claims Mip0099"
+        );
+
+        let unset = initial_state().build();
+        assert_eq!(
+            contract_state_discriminator(&deploy::data_only_bytes(unset.clone()))
+                .expect("a ContractState"),
+            Some([0; 32]),
+            "{name}: never written"
+        );
+        assert!(
+            !implements::<Mip0099>(&unset),
+            "{name}: unwritten claims nothing"
+        );
+    }
+}
+
+/// compactc's own states without a magic: `Adts` starts with a Counter
+/// (`None`); `e_adts` starts with a `Bytes<32>` nobody wrote (32 zero bytes).
+#[test]
+fn t5_compactcs_states_without_a_magic() {
+    assert_eq!(
+        contract_state_discriminator(&oracle("adts")).expect("a ContractState"),
+        None,
+        "adts: a Counter first"
+    );
+    assert_eq!(
+        contract_state_discriminator(&oracle("e_adts")).expect("a ContractState"),
+        Some([0; 32]),
+        "e_adts: an unwritten Bytes<32> first"
+    );
+}
+
+/// Bytes that are not ONE `ContractState` of this ledger version are an
+/// `Err`, never a discriminator: every proper prefix, trailing bytes,
+/// another version's tag, no tag, another type's tagged bytes, garbage.
+#[test]
+fn t5_bytes_that_are_not_a_contract_state_are_an_error() {
+    let good = oracle("b_n16");
+    assert_eq!(
+        contract_state_discriminator(&good).expect("a ContractState"),
+        Some(Mip0099::MAGIC)
+    );
+
+    for len in 0..good.len() {
+        assert!(
+            contract_state_discriminator(&good[..len]).is_err(),
+            "a {len}-byte prefix of {} bytes",
+            good.len()
+        );
+    }
+
+    let mut trailing = good.clone();
+    trailing.push(0);
+    assert!(
+        contract_state_discriminator(&trailing).is_err(),
+        "one trailing byte"
+    );
+    let twice = [good.as_slice(), good.as_slice()].concat();
+    assert!(
+        contract_state_discriminator(&twice).is_err(),
+        "two states back to back"
+    );
+
+    let tag_error = |bytes: &[u8], what: &str| {
+        let err = contract_state_discriminator(bytes).expect_err(what);
+        assert!(
+            err.to_string().contains("contract-state[v8]"),
+            "{what}: the error names the expected tag: {err}"
+        );
+    };
+    let mut v7 = good.clone();
+    let at_version = CONTRACT_STATE_TAG.len() - b"v8]:".len();
+    assert_eq!(&v7[at_version..at_version + 2], b"v8");
+    v7[at_version + 1] = b'7';
+    tag_error(&v7, "a [v7] tag");
+    tag_error(&good[CONTRACT_STATE_TAG.len()..], "no tag");
+    tag_error(&bytes_of(&b32_cell(Mip0099::MAGIC)), "a tagged StateValue");
+    tag_error(&[0xa5; 64], "garbage");
 }

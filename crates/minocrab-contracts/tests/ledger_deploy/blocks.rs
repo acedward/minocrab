@@ -1784,6 +1784,11 @@ pub fn cases() -> Vec<Case> {
 }
 
 #[derive(Ledger)]
+pub struct C1 {
+    pub magic: LedgerCell<B32P>,
+}
+
+#[derive(Ledger)]
 pub struct C16 {
     pub magic: LedgerCell<B32P>,
     pub f1: LedgerCell<U64>,
