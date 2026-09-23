@@ -1,0 +1,21 @@
+# compactc 0.34.0's generated `initialState` for
+# the committed fixture `tests/fixtures/header_small/out/contract/index.js`
+# (`header_small.compact`: `export sealed ledger magic: Bytes<32>;` first, then `value: Uint<64>`,
+# `count: Counter`, `balances: Map<Bytes<32>, Uint<64>>`, `owner: Bytes<32>`, and a constructor
+# writing `magic = pad(32, "mip-0099:ledger-header[v1]")`),
+# run in node 22 on compact-runtime 0.19.0 + @midnightntwrk/onchain-runtime-v4 4.0.0-rc.3
+# (= ledger-9.1.0.0-rc.3, the runtime compactc 0.34.0 targets; `checkRuntimeVersion('0.19.0')`
+# passes). Produced by project 00002 P0b's JS oracle on 2026-09-23
+# (experiments/00002-tools/js-oracle/oracle.mjs via run.sh, `header_small.data-only.state.hex`;
+# reproduced byte-identically by P4 with both run.sh and P2's initial-state.mjs via run-initial.sh:
+# node:22-bookworm-slim, --network none, two runs byte-identical each); compactc from the pinned
+# release archive (Docker image aa-compactc:0.34.0, `--skip-zk --feature-zkir-v3`).
+#
+# The bytes: `ContractState.serialize()` of a DEFAULT ContractState whose `data` is the initial
+# state's `data` (no operations, default maintenance authority, empty balance) — the tagged
+# `midnight:contract-state[v8]` form of the state tree alone. `tests/header_small_differential.rs`
+# compares it with `ContractState::new(initial_state().build(), {}, Default::default())`, serialized.
+#
+# Shape: Array(5): the magic at [0] (stored trimmed, 26 bytes), then the four own fields at [1]..[4].
+# sha256 of the hex line: 9e717864f206a1878b4424e373657a2705bd6bb71c779379585b6740438edb4f
+6d69646e696768743a636f6e74726163742d73746174655b76385d3a4c00745a6d69702d303039393a6c65646765722d6865616465725b76315d2001040004010008400804080401040c080104000400041404020418080104000c402001042004010424080104401410101c28141414141414141414141408021008042c080414043004030434000438080104043c7c0304356c400000104000001040000010400000104000001040000010400000044015020304ff01020104030401080414080104010401745a6d69702d303039393a6c65646765722d6865616465725b76315d2001000108021040010400000108010404010401040108400800010801040401040104010840080001080104040104020401040000010801040401040104010c402001000104000001040000010400000104000001001430144414141003000400
