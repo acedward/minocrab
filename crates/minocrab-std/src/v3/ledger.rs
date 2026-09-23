@@ -120,8 +120,11 @@ pub trait LedgerRepr: Sized {
     /// JS writes `{x: 0, y: 0, identity: true}` and `{x: 0, y: 1}`). A
     /// composite of other `LedgerRepr` types is its fields' defaults in
     /// order, which `#[derive(LedgerRepr)]` emits; a hand-written composite
-    /// holding a point overrides this the same way. (`Maybe` and `Either`
-    /// cannot hold a point at all: a point is not a `CallResult`.)
+    /// composes its components' defaults the same way — a GENERIC one
+    /// always, because its type parameter may be a point (the `evm_flow`
+    /// wrappers `Owned`, `HandleOwned`, `QueueEntry`, `Outstanding` do).
+    /// (`Maybe` and `Either` cannot hold a point at all: a point is not a
+    /// `CallResult`.)
     ///
     /// Off-chain only: no circuit reads this — a circuit's own default is
     /// [`minocrab_ledger::default_value`]'s zero limbs.

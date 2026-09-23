@@ -894,6 +894,11 @@ impl<T, Tag> LedgerRepr for Commit<T, Tag> {
         <B32<Public> as LedgerRepr>::atoms()
     }
 
+    /// The digest's default: a composite's default is its components'.
+    fn default_stored() -> Vec<Vec<u8>> {
+        <B32<Public> as LedgerRepr>::default_stored()
+    }
+
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
         LedgerRepr::push_limbs(&self.digest, c, limbs)
     }
@@ -935,6 +940,14 @@ impl<E: LedgerRepr> LedgerRepr for Owned<E> {
         let mut atoms = <Commit<SecretKey<Private>, OwnerTag> as LedgerRepr>::atoms();
         atoms.extend(E::atoms());
         atoms
+    }
+
+    /// The components' defaults in `atoms` order — so an `E` whose default
+    /// is not zero (a curve point's identity) keeps it in the deploy state.
+    fn default_stored() -> Vec<Vec<u8>> {
+        let mut stored = <Commit<SecretKey<Private>, OwnerTag> as LedgerRepr>::default_stored();
+        stored.extend(E::default_stored());
+        stored
     }
 
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
@@ -1665,6 +1678,16 @@ impl<const WORDS: usize> LedgerRepr for PreRecord<WORDS> {
         atoms
     }
 
+    /// The components' defaults in `atoms` order.
+    fn default_stored() -> Vec<Vec<u8>> {
+        let mut stored = <Bytes<20, Public> as LedgerRepr>::default_stored();
+        stored.extend(<Uint<8, Public> as LedgerRepr>::default_stored());
+        for _ in 0..WORDS {
+            stored.extend(<B32<Public> as LedgerRepr>::default_stored());
+        }
+        stored
+    }
+
     fn push_limbs(&self, _c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
         limbs.extend_from_slice(&self.0);
     }
@@ -1706,6 +1729,13 @@ impl<Env: LedgerRepr, const WORDS: usize> LedgerRepr for QueueEntry<Env, WORDS> 
         let mut atoms = <PreRecord<WORDS> as LedgerRepr>::atoms();
         atoms.extend(Env::atoms());
         atoms
+    }
+
+    /// The components' defaults in `atoms` order (see [`Owned`]'s).
+    fn default_stored() -> Vec<Vec<u8>> {
+        let mut stored = <PreRecord<WORDS> as LedgerRepr>::default_stored();
+        stored.extend(Env::default_stored());
+        stored
     }
 
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
@@ -1755,6 +1785,14 @@ impl<E: LedgerRepr> LedgerRepr for HandleOwned<E> {
         atoms.extend(<Commit<SecretKey<Private>, OwnerTag> as LedgerRepr>::atoms());
         atoms.extend(E::atoms());
         atoms
+    }
+
+    /// The components' defaults in `atoms` order (see [`Owned`]'s).
+    fn default_stored() -> Vec<Vec<u8>> {
+        let mut stored = <Handle<Public> as LedgerRepr>::default_stored();
+        stored.extend(<Commit<SecretKey<Private>, OwnerTag> as LedgerRepr>::default_stored());
+        stored.extend(E::default_stored());
+        stored
     }
 
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {

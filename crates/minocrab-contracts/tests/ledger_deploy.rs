@@ -20,9 +20,11 @@
 //!   equals what compactc 0.34.0's generated `initialState` serializes, byte
 //!   for byte (`tests/fixtures/initial_state/*.state.hex`, produced in node
 //!   by project 00002's JS oracle; provenance in each file's header): one
-//!   field of every ledger type (`e_adts`), the shipped `Adts` contract, and
-//!   the magic-first probes of 1, 16 and 226 fields — whose magic a Compact
-//!   CONSTRUCTOR writes, reproduced here with `StateBuilder::set`.
+//!   field of every ledger type (`e_adts`), the shipped `Adts` contract, a
+//!   curve point inside the record of each generic `evm_flow` wrapper
+//!   (`wrapped_points`), and the magic-first probes of 1, 16 and 226
+//!   fields — whose magic a Compact CONSTRUCTOR writes, reproduced here with
+//!   `StateBuilder::set`.
 //! - **T5, the reader** (spec 00002 FR-008, SC-004; `v3::discriminator`).
 //!   On the SERIALIZED, tagged `ContractState` of every T4 block as the
 //!   ledger holds it after the deploy, it returns the standard's magic
@@ -50,8 +52,12 @@ use midnight_onchain_state::state::{
 use midnight_storage::db::InMemoryDB;
 use midnight_storage::storage::HashMap as StorageHashMap;
 use minocrab::v3::{Circuit3, Compiled3};
-use minocrab::{AlignmentAtom, Public};
-use minocrab_contracts::evm_flow::{HandleOwned, Outbox, Owned, Pending};
+use minocrab::{AlignmentAtom, Private, Public};
+use minocrab_contracts::common::SecretKey;
+use minocrab_contracts::evm_flow::{
+    Commit, Handle, HandleOwned, Outbox, Outstanding, Owned, OwnerTag, Pending, PreRecord,
+    QueueEntry,
+};
 use minocrab_contracts::signet_flow::Signet;
 use minocrab_contracts::treasury::{Amount, Transfer};
 use minocrab_ledger::stored_cell;
@@ -702,6 +708,73 @@ fn t4b_the_magic_first_probes_are_compactcs_initial_state() {
         &[0, 0, 0]
     );
     assert_oracle("b_n226", state.build());
+}
+
+type Secp = Secp256k1Point<Public>;
+type Jub = JubjubPoint<Public>;
+
+/// A generic `evm_flow` wrapper's DEFAULT is its components' defaults in
+/// `atoms` order (audit R2): a curve point inside one keeps its identity,
+/// where the provided `default_stored` would give zeros.
+#[test]
+fn t4b_a_generic_wrapper_composes_its_components_defaults() {
+    let secp = Secp::default_stored();
+    let jub = Jub::default_stored();
+    // The identities, as compactc's JS stores them (pinned by `e_adts`).
+    assert_eq!(jub, vec![vec![], vec![1]]);
+    assert_eq!(secp.len(), 5);
+    assert_eq!(secp[4], vec![1]);
+    assert!(!secp[0].is_empty() && !secp[2].is_empty());
+    // Each wrapper, component by component; every default as long as the
+    // wrapper's atom list.
+    let commit = <Commit<SecretKey<Private>, OwnerTag> as LedgerRepr>::default_stored();
+    assert_eq!(commit, B32P::default_stored());
+    let owned = Owned::<Secp>::default_stored();
+    assert_eq!(owned, [commit.clone(), secp.clone()].concat());
+    assert_eq!(owned.len(), Owned::<Secp>::atoms().len());
+    let handle_owned = HandleOwned::<Jub>::default_stored();
+    assert_eq!(
+        handle_owned,
+        [Handle::<Public>::default_stored(), commit, jub.clone()].concat()
+    );
+    assert_eq!(handle_owned.len(), HandleOwned::<Jub>::atoms().len());
+    let pre = PreRecord::<1>::default_stored();
+    assert_eq!(
+        pre,
+        [
+            Bytes::<20, Public>::default_stored(),
+            U8::default_stored(),
+            B32P::default_stored()
+        ]
+        .concat()
+    );
+    assert_eq!(pre.len(), PreRecord::<1>::atoms().len());
+    let queued = QueueEntry::<Secp, 1>::default_stored();
+    assert_eq!(queued, [pre, secp].concat());
+    assert_eq!(queued.len(), QueueEntry::<Secp, 1>::atoms().len());
+    let outstanding = Outstanding::<Jub>::default_stored();
+    assert_eq!(outstanding, [jub, U64::default_stored()].concat());
+    assert_eq!(outstanding, vec![vec![], vec![1], vec![]]);
+    // A wrapper of zero-default components is all zeros, as before.
+    assert!(Owned::<U64>::default_stored().iter().all(Vec::is_empty));
+}
+
+/// `wrapped_points.compact`'s four records, as the wrappers they mirror:
+/// the same atom sequences, each with a point for its type parameter.
+#[derive(Ledger)]
+struct WrappedPoints {
+    owned: LedgerCell<Owned<Secp>>,
+    outstanding: LedgerCell<Outstanding<Jub>>,
+    handle_owned: LedgerCell<HandleOwned<Jub>>,
+    queued: LedgerCell<QueueEntry<Secp, 1>>,
+}
+
+/// A point inside a record, against compactc's JS (audit R2): compactc
+/// defaults a record member by member, so the point is at its identity in
+/// each Cell, and so is minocrab's — byte for byte.
+#[test]
+fn t4b_a_point_inside_a_wrapper_is_compactcs_initial_state() {
+    assert_oracle("wrapped_points", WrappedPoints::initial_state().build());
 }
 
 // ---- T5: the reader, on serialized states ------------------------------------------------

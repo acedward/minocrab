@@ -117,6 +117,15 @@ impl<Env: LedgerRepr> LedgerRepr for Outstanding<Env> {
         atoms
     }
 
+    /// The components' defaults in `atoms` order — so an `Env` whose
+    /// default is not zero (a curve point's identity) keeps it in the
+    /// deploy state.
+    fn default_stored() -> Vec<Vec<u8>> {
+        let mut stored = Env::default_stored();
+        stored.extend(<Uint<64, Public> as LedgerRepr>::default_stored());
+        stored
+    }
+
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
         LedgerRepr::push_limbs(&self.env, c, limbs);
         LedgerRepr::push_limbs(&self.seen, c, limbs);
