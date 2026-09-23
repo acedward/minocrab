@@ -43,6 +43,13 @@ borsh = { workspace = true, optional = true }
 # `#[derive(CircuitArg)]`, re-exported next to the trait it implements
 # (v3::CircuitArg names both, as serde's does).
 minocrab-macros = { workspace = true, optional = true }
+# The DEPLOY STATE (v3::state, notes/ledger-header.org): a block's
+# `initial_state()` is a `StateValue` tree, so the builder names the state
+# tree's own types. Both are already minocrab-ledger's dependencies (its
+# `empty_*` values are `StateValue`s) and were this crate's dev-dependencies
+# — no crate enters the graph.
+midnight-onchain-state.workspace = true
+midnight-storage.workspace = true
 
 [features]
 default = ["macros"]
@@ -58,10 +65,9 @@ all-features = true
 [dev-dependencies]
 minocrab-sim = { path = "../minocrab-sim", features = ["unstable"] }
 # The blind ops' gate (M40, tests/v3_blind.rs) seeds a `StateValue` and runs
-# each transcript through Midnight's on-chain VM via the executor; these
-# three are the state tree's own types. Already in the lock.
-midnight-onchain-state.workspace = true
-midnight-storage.workspace = true
+# each transcript through Midnight's on-chain VM via the executor; with the
+# two state-tree crates above (now dependencies), these are its types.
+# Already in the lock.
 midnight-base-crypto.workspace = true
 midnight-onchain-vm.workspace = true
 minocrab-ir = { path = "../minocrab-ir", features = ["unstable"] }

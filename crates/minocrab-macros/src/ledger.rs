@@ -34,6 +34,16 @@
 //!         }
 //!     }
 //! }
+//! impl Vault {
+//!     pub fn initial_state() -> ::minocrab_std::v3::StateBuilder {
+//!         const __BLOCK: Vault = Vault::new();
+//!         let mut __state = ::minocrab_std::v3::StateBuilder::new();
+//!         ::minocrab_std::v3::InitialState::contribute(&__BLOCK.sign_bidirectional_event_map, &mut __state);
+//!         ::minocrab_std::v3::InitialState::contribute(&__BLOCK.signet_signer, &mut __state);
+//!         ::minocrab_std::v3::InitialState::contribute(&__BLOCK.signet_request_nonce, &mut __state);
+//!         __state
+//!     }
+//! }
 //! impl Default for Vault { fn default() -> Self { Self::new() } }
 //! const _: () = ::minocrab_std::v3::assert_distinct_kinds(&[<… as W>::KINDS, …]);
 //! const _: usize = ::minocrab_std::v3::standards(&[<… as W>::PLACEMENT, …]);
@@ -59,6 +69,11 @@
 //! Two standards are E0080 (one standard per ledger block). Nothing here
 //! looks for a standard by name: the type decides, as the owner of the
 //! standard intends.
+//!
+//! THE DEPLOY STATE is the same walk once more: `initial_state()` hands every
+//! field to its type's `InitialState::contribute`, which writes the slot's
+//! initial value at the path `new()` gave it (minocrab-std `v3::state`). A
+//! `StateBuilder` call per field, and nothing computed here.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -179,6 +194,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
     });
 
+    let idents: Vec<&Option<syn::Ident>> = fields.iter().map(|f| &f.ident).collect();
+
     Ok(quote! {
         impl #name {
             /// The ledger block: every field at its DECLARATION-ORDER index.
@@ -191,6 +208,20 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 const __LAYOUT: ::minocrab_std::v3::BlockLayout =
                     ::minocrab_std::v3::BlockLayout::of_block(__TOTAL, __HEADERS);
                 #name { #(#inits),* }
+            }
+
+            /// The block's DEPLOY-TIME state (notes/ledger-header.org): every
+            /// slot's initial value at its path — what compactc's generated
+            /// `initialState` builds for the same fields — and a standard's
+            /// magic, which no circuit writes. `set` what a Compact
+            /// constructor would write (an untyped `LedgerField` is left
+            /// Null), then `build`.
+            pub fn initial_state() -> ::minocrab_std::v3::StateBuilder {
+                const __BLOCK: #name = #name::new();
+                #[allow(unused_mut)]
+                let mut __state = ::minocrab_std::v3::StateBuilder::new();
+                #( ::minocrab_std::v3::InitialState::contribute(&__BLOCK.#idents, &mut __state); )*
+                __state
             }
         }
 
@@ -518,6 +549,41 @@ mod tests {
         expand(fields(257)).expect("256 body fields and a standard expand");
         let error = expand(fields(258)).expect_err("258 fields are rejected");
         assert!(error.to_string().contains("at most 256 fields"), "{error}");
+    }
+
+    /// THE DEPLOY STATE: `initial_state()` hands every field, in
+    /// declaration order, to its type's `InitialState::contribute` against
+    /// the block's own `new()` — calls and paths, no circuit.
+    #[test]
+    fn the_initial_state_is_every_fields_contribution() {
+        let expanded = expansion(syn::parse_quote! {
+            struct Vault {
+                event_map: LedgerMap<B32<Public>, VaultRecord>,
+                std: Mip0099,
+                initialized: LedgerCounter,
+            }
+        });
+        assert!(
+            expanded.contains("pub fn initial_state () -> :: minocrab_std :: v3 :: StateBuilder"),
+            "{expanded}"
+        );
+        assert!(
+            expanded.contains("const __BLOCK : Vault = Vault :: new () ;"),
+            "{expanded}"
+        );
+        let calls = ["event_map", "std", "initialized"].map(|f| {
+            format!(
+                ":: minocrab_std :: v3 :: InitialState :: contribute (& __BLOCK . {f} , & mut __state) ;"
+            )
+        });
+        let mut at = 0;
+        for call in &calls {
+            let found = expanded[at..]
+                .find(call.as_str())
+                .unwrap_or_else(|| panic!("{call} in order:\n{expanded}"));
+            at += found + call.len();
+        }
+        assert!(!expanded.contains("Circuit3"), "{expanded}");
     }
 
     /// A ledger block is one contract's state.

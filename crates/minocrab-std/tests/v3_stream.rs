@@ -155,6 +155,16 @@ impl Seed {
     }
 }
 
+/// THE DEPLOY STATE (notes/ledger-header.org): the block's derived
+/// `initial_state()` is this file's own hand seed at its defaults — both
+/// streams' maps empty and every cell (bodies, accumulators, the trailing
+/// cell) at zero — so a `Stream` contributes exactly the fields its width
+/// claims, in the order its handles address them.
+#[test]
+fn the_derived_initial_state_is_the_default_seed() {
+    assert!(Block::initial_state().build() == Seed::default().state());
+}
+
 fn field(state: &StateValue<InMemoryDB>, index: usize) -> StateValue<InMemoryDB> {
     let StateValue::Array(ref fields) = *state else {
         panic!("block array");

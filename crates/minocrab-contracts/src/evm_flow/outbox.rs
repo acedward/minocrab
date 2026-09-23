@@ -42,7 +42,8 @@ use minocrab_ledger::{XcallCommitment, XcallEntryPointHash};
 use minocrab_std::v3::blind::{Add, Max};
 use minocrab_std::v3::{
     label, own_public_key, repr_limbs, Assumed, BlockLayout, Disclose, DisclosureLabel, FieldPath,
-    LedgerRepr, LedgerWidth, ProofWires, Stream, StreamSpec, Uint, ZswapCoinPublicKey,
+    InitialState, LedgerRepr, LedgerWidth, ProofWires, StateBuilder, Stream, StreamSpec, Uint,
+    ZswapCoinPublicKey,
 };
 use signet_signer_interface::RequestId;
 
@@ -207,6 +208,15 @@ impl<F: Filing, Env: LedgerRepr, const WORDS: usize> Outbox<F, Env, WORDS> {
 impl<F: Filing, Env: LedgerRepr, const WORDS: usize> LedgerWidth for Outbox<F, Env, WORDS> {
     const WIDTH: usize = 2 + <Stream<OutboxSpec<Env, WORDS>> as LedgerWidth>::WIDTH;
     const KINDS: &'static [u8] = &[F::KIND];
+}
+
+/// The `Pending`'s two maps, then the stream's five fields — all empty, the
+/// nonce and last-seen cells at zero.
+impl<F: Filing, Env: LedgerRepr, const WORDS: usize> InitialState for Outbox<F, Env, WORDS> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        self.pending.contribute(state);
+        self.stream.contribute(state);
+    }
 }
 
 impl<F: Filing, Env: LedgerRepr + ProofWires, const WORDS: usize> Outbox<F, Env, WORDS>

@@ -84,8 +84,8 @@ use minocrab_std::v3::Serializer;
 use minocrab_std::v3::Assumed;
 use minocrab_std::v3::{
     is_true, kernel, label, not, ArgPath, BlockLayout, CircuitAbi, CircuitArg, Disclose,
-    LedgerCell, LedgerCounter, LedgerField, LedgerMap, LedgerRepr, LedgerWidth, Prim,
-    Secp256k1Point, Uint,
+    InitialState, LedgerCell, LedgerCounter, LedgerField, LedgerMap, LedgerRepr, LedgerWidth, Prim,
+    Secp256k1Point, StateBuilder, Uint,
 };
 use signet_signer_interface::notification::construct_notification_v1;
 use signet_signer_interface::{RequestId, SignetSigner};
@@ -270,6 +270,20 @@ impl Signet {
 
 impl LedgerWidth for Signet {
     const WIDTH: usize = 5;
+}
+
+/// The five fields at deploy: the MPC key, caip2 id and chain id at their
+/// types' defaults, the nonce at zero, and the SEALED signer cell Null —
+/// it is a `LedgerField`, untyped, so the deployer `set`s the singleton's
+/// address the way the Compact constructor would.
+impl InitialState for Signet {
+    fn contribute(&self, state: &mut StateBuilder) {
+        self.signer.contribute(state);
+        self.mpc_response_key.contribute(state);
+        self.request_nonce.contribute(state);
+        self.caip2_id.contribute(state);
+        self.evm_chain_id.contribute(state);
+    }
 }
 
 // ---- the request ---------------------------------------------------------------------

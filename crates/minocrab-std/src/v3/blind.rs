@@ -61,6 +61,7 @@ use minocrab::Public;
 use super::assumed::Assumed;
 use super::hook::{Hook, Lowered};
 use super::ledger::{BlockLayout, LedgerCell, LedgerMap, LedgerRepr};
+use super::state::{InitialState, StateBuilder};
 use super::{Bool, Uint};
 
 /// A step the LEDGER executes: an accumulator laid out as one or more cells,
@@ -75,10 +76,11 @@ pub trait Primitive<S>: Sized {
     const ACC_FIELDS: usize;
     /// Ledger fields the snapshot maps occupy (one per component).
     const SNAPSHOT_FIELDS: usize;
-    /// The accumulator handle(s).
-    type Acc;
-    /// The per-key snapshot map(s), keyed by `K`.
-    type Snapshot<K>;
+    /// The accumulator handle(s). Its deploy-time state is its cells'
+    /// defaults ([`InitialState`], notes/ledger-header.org).
+    type Acc: InitialState;
+    /// The per-key snapshot map(s), keyed by `K` — empty at deploy.
+    type Snapshot<K>: InitialState;
 
     /// The accumulator's handles from flat body field `start` under
     /// `layout` — what a nested ledger struct (`Stream`) calls.
@@ -313,6 +315,14 @@ pub struct FirstAcc<S> {
     pub value: LedgerCell<S>,
     /// `true` once the first delta has landed.
     pub written: LedgerCell<Bool<Public>>,
+}
+
+/// Both cells at their defaults: the value unset, `written` false.
+impl<S: LedgerRepr> InitialState for FirstAcc<S> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        self.value.contribute(state);
+        self.written.contribute(state);
+    }
 }
 
 impl<S: LedgerRepr> Primitive<S> for First {

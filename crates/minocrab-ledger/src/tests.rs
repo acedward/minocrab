@@ -1035,3 +1035,115 @@ fn adt_valued_insert_default_pushes_the_initial_value() {
         vec![Fr::from(0x11u64), 1u64.into(), 1u64.into(), 8u64.into(), 0u64.into()]
     );
 }
+
+// ---- the deploy state's values (notes/ledger-header.org) ---------------------
+
+/// A Cell of ZEROS, as a deploy state stores it, is the circuit's default:
+/// its field representation is exactly [`default_value`]'s zero limbs, for
+/// every atom kind a slot type is made of — so the deploy builder's default
+/// Cell and a circuit's `resetToDefault`-shaped write (`cell_write_at` of
+/// `default_value`) are one value. Zeros given at full width normalize to
+/// the same stored value (FAB drops trailing zero bytes).
+#[test]
+fn a_stored_zero_cell_is_the_default_values_limbs() {
+    use midnight_transient_crypto::fab::ValueReprAlignedValue;
+    let b = |length| AlignmentAtom::Bytes { length };
+    for atoms in [
+        vec![b(1)],
+        vec![b(8)],
+        vec![b(32)],
+        vec![b(2), b(3)],
+        vec![b(1), b(32)],
+        vec![AlignmentAtom::Field],
+        vec![AlignmentAtom::Compress],
+        vec![AlignmentAtom::Field, AlignmentAtom::Field],
+        vec![b(24), b(8), b(24), b(8), AlignmentAtom::Field],
+    ] {
+        let empty = stored_cell(atoms.clone(), vec![Vec::new(); atoms.len()]);
+        let StateValue::Cell(ref av) = empty else {
+            panic!("stored_cell builds a Cell");
+        };
+        let mut limbs: Vec<Fr> = Vec::new();
+        ValueReprAlignedValue((**av).clone()).field_repr(&mut limbs);
+        let zeros: Vec<Fr> = default_value(atoms.clone())
+            .elems()
+            .iter()
+            .map(|e| match e {
+                ImpactElem::Imm(f) => *f,
+                ImpactElem::Wire(_) => panic!("default_value is constant"),
+            })
+            .collect();
+        assert_eq!(limbs, zeros, "{atoms:?}");
+        let full_width: Vec<Vec<u8>> = atoms
+            .iter()
+            .map(|a| match a {
+                AlignmentAtom::Bytes { length } => vec![0; *length as usize],
+                _ => vec![0],
+            })
+            .collect();
+        assert!(stored_cell(atoms.clone(), full_width) == empty, "{atoms:?}");
+    }
+}
+
+/// A `Bytes<32>` ending in NUL bytes is stored TRIMMED (the placeholder
+/// magic keeps 26 of its 32), under the one-atom `bytes<32>` alignment —
+/// the form compactc's constructor writes (P0b's oracle: 26 bytes stored).
+#[test]
+fn a_magic_is_stored_trimmed_under_one_bytes32_atom() {
+    let mut magic = [0u8; 32];
+    magic[..26].copy_from_slice(b"mip-0099:ledger-header[v1]");
+    let cell = stored_cell(
+        vec![AlignmentAtom::Bytes { length: 32 }],
+        vec![magic.to_vec()],
+    );
+    let StateValue::Cell(ref av) = cell else {
+        panic!("stored_cell builds a Cell");
+    };
+    assert_eq!(av.value.0.len(), 1);
+    assert_eq!(av.value.0[0].0, b"mip-0099:ledger-header[v1]".to_vec());
+    assert_eq!(
+        av.alignment,
+        Alignment(vec![AlignmentSegment::Atom(AlignmentAtom::Bytes {
+            length: 32
+        })])
+    );
+}
+
+/// The two lists must agree: one stored value per atom.
+#[test]
+#[should_panic(expected = "stored atoms for alignment")]
+fn a_stored_cell_needs_one_value_per_atom() {
+    let _ = stored_cell(vec![AlignmentAtom::Bytes { length: 8 }], vec![]);
+}
+
+/// A reset HistoricMerkleTree is the declared value with ONE history
+/// entry — the blank tree's root, valued Null — which is what
+/// `history_append` leaves (the VM-run twin of this is minocrab-std's
+/// `v3_state`, and compactc's JS agrees in project 00002's T4b).
+#[test]
+fn a_reset_historic_tree_remembers_the_blank_root() {
+    let reset = historic_merkle_tree_reset_value(10);
+    let declared = empty_historic_merkle_tree_value(10);
+    let (StateValue::Array(ref reset), StateValue::Array(ref declared)) = (reset, declared) else {
+        panic!("both are Arrays");
+    };
+    assert_eq!(reset.len(), 3);
+    assert!(reset.get(0) == declared.get(0), "the blank tree");
+    assert!(reset.get(1) == declared.get(1), "next index 0");
+    let (Some(StateValue::Map(history)), Some(StateValue::Map(empty))) =
+        (reset.get(2), declared.get(2))
+    else {
+        panic!("the history is a Map");
+    };
+    assert!(empty.is_empty());
+    assert_eq!(history.size(), 1);
+    let entry = history.iter().next().expect("one entry");
+    let (ref root, ref value) = *entry;
+    // The root of a blank tree is the field element zero, stored as the
+    // empty `field` atom.
+    assert_eq!(
+        root.alignment,
+        Alignment(vec![AlignmentSegment::Atom(AlignmentAtom::Field)])
+    );
+    assert!(**value == StateValue::Null);
+}

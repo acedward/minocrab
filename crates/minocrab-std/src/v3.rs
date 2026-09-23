@@ -28,6 +28,7 @@ mod disclose;
 mod entry;
 mod header;
 mod ledger;
+mod state;
 
 /// Blind accumulators (M40): the steps the ledger applies itself — `Add`,
 /// `Max`, `Min`, `And`, `Or`, `Last`, `First` and tuples of them — with a
@@ -92,6 +93,14 @@ pub use ledger::{
 /// it, [`Magic`] is the magic's read-only slot, and [`HeaderField`] the
 /// sealed set of slot types a standard may own besides it.
 pub use header::{pad32, HeaderField, LedgerHeader, Magic};
+
+/// The deploy state (notes/ledger-header.org): every `#[derive(Ledger)]`
+/// block's `initial_state()` is a [`StateBuilder`] holding each slot's
+/// initial value at its path — compactc's `initialState` for the same fields,
+/// a standard's magic already written — which `set` edits the way a Compact
+/// constructor would and `build` assembles into the `StateValue` a deploy
+/// carries. [`InitialState`] is each slot type's share of it.
+pub use state::{InitialState, StateBuilder};
 
 /// Assertion predicates: `c.assert(less_than(0u64, amount))` — deferred,
 /// `#[must_use]` descriptors whose widths come from the operand types (see

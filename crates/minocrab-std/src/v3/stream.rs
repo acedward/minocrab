@@ -88,6 +88,7 @@ use super::blind::{Add, And, First, Last, Max, Min, Or, Primitive};
 use super::hook::Hook;
 use super::ledger::{BlockLayout, LedgerCell, LedgerMap, LedgerRepr, LedgerWidth};
 use super::predicate::{is_true, not};
+use super::state::{InitialState, StateBuilder};
 use super::NonEmpty;
 
 /// What a stream carries and how it steps.
@@ -123,6 +124,9 @@ pub trait Step<P: StreamSpec>: Sized {
     fn insert(s: &Stream<P>, c: &mut Circuit3, key: &P::Key, body: &P::Body);
     fn take(s: &Stream<P>, c: &mut Circuit3, key: &P::Key) -> (Assumed<P::Body>, Assumed<P::State>);
     fn combine(s: &Stream<P>, c: &mut Circuit3, delta: Self::Delta);
+    /// The step's fields at deploy (notes/ledger-header.org): every cell at
+    /// its default, every map empty. Off-chain; no circuit.
+    fn contribute(s: &Stream<P>, state: &mut StateBuilder);
 }
 
 /// A step of real code, for [`Serial`]: `s ⊕ d` however the author likes,
@@ -201,6 +205,17 @@ impl<P: StreamSpec> LedgerWidth for Stream<P> {
     const WIDTH: usize = 1 + <P::Step as Step<P>>::WIDTH;
 }
 
+/// The bodies map, then the step's fields — each at its own default. The
+/// accumulator starts at its cells' default, which is the identity of `Add`,
+/// `Max` and `Or` and not of `Min` or `And`: `StateBuilder::set` the cell for
+/// a stream that must start at the identity.
+impl<P: StreamSpec> InitialState for Stream<P> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        self.bodies().contribute(state);
+        <P::Step as Step<P>>::contribute(self, state);
+    }
+}
+
 impl<P: StreamSpec> ContentionFree for Stream<P> where P::Step: Primitive<P::State> {}
 
 // ---- the primitive layout: bodies, then the step's cells and maps ---------------
@@ -269,6 +284,16 @@ macro_rules! primitive_steps {
                 let hook = <$ty as Primitive<P::State>>::combine(c, Hook::new(), &acc, &delta);
                 c.then(hook);
             }
+
+            /// The accumulator's cells, then the snapshot maps.
+            fn contribute(s: &Stream<P>, state: &mut StateBuilder) {
+                <$ty as Primitive<P::State>>::acc_at_layout(s.layout, s.start + 1).contribute(state);
+                <$ty as Primitive<P::State>>::snapshot_at_layout::<P::Key>(
+                    s.layout,
+                    s.start + 1 + <$ty as Primitive<P::State>>::ACC_FIELDS,
+                )
+                .contribute(state);
+            }
         }
     )*};
 }
@@ -323,6 +348,13 @@ where
         let state = acc.read(c).stale(c);
         let next = F::step(c, state, delta);
         acc.write(c, &next);
+    }
+
+    /// The heads map, the accumulator cell, the staged map.
+    fn contribute(s: &Stream<P>, state: &mut StateBuilder) {
+        s.heads().contribute(state);
+        s.acc().contribute(state);
+        s.staged().contribute(state);
     }
 }
 

@@ -506,8 +506,8 @@ use minocrab_std::v3::borsh::CircuitBorsh;
 use minocrab_std::v3::hash::{transient_hash_compact, upgrade_from_transient};
 use minocrab_std::v3::{
     eq, is_true, label, not, own_public_key, repr_limbs, ArgPath, Assumed, BlockLayout, Bytes,
-    CircuitAbi, CircuitArg, Disclose, DisclosureLabel, FieldPath, LedgerMap, LedgerRepr,
-    LedgerWidth, Prim, ProofWires, Uint, Vis3, ZswapCoinPublicKey, B32,
+    CircuitAbi, CircuitArg, Disclose, DisclosureLabel, FieldPath, InitialState, LedgerMap,
+    LedgerRepr, LedgerWidth, Prim, ProofWires, StateBuilder, Uint, Vis3, ZswapCoinPublicKey, B32,
 };
 use minocrab::v3::Val;
 use signet_signer_interface::{RequestId, Signature};
@@ -1126,6 +1126,22 @@ impl<F: Filing, const WORDS: usize> LedgerWidth for Fired<F, WORDS> {
 impl<F: Filing, Env, const WORDS: usize> LedgerWidth for Pending<F, Env, WORDS> {
     const WIDTH: usize = 2;
     const KINDS: &'static [u8] = &[F::KIND];
+}
+
+/// Its two maps, empty. The `Signet` it reads is the block's own field,
+/// which contributes itself.
+impl<F: Filing, Env, const WORDS: usize> InitialState for Pending<F, Env, WORDS> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        self.records.contribute(state);
+        self.envs.contribute(state);
+    }
+}
+
+/// Its record map, empty; the `Signet` is the block's.
+impl<F: Filing, const WORDS: usize> InitialState for Fired<F, WORDS> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        self.records.contribute(state);
+    }
 }
 
 impl<F: Filing, Env: LedgerRepr, const WORDS: usize> Pending<F, Env, WORDS>

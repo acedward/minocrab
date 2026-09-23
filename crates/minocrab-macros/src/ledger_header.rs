@@ -30,6 +30,13 @@
 //!     }
 //!     pub const fn magic(&self) -> S::Magic { S::Magic::at_path(&[0u8, 0u8]) }
 //! }
+//! impl S::InitialState for Versioned {
+//!     fn contribute(&self, state: &mut S::StateBuilder) {
+//!         state.magic(self.magic(), &<Versioned as S::LedgerHeader>::MAGIC);
+//!         S::InitialState::contribute(&self.version, state);
+//!         S::InitialState::contribute(&self.admin, state);
+//!     }
+//! }
 //! const _: () = S::__derive::assert_magic(&<Versioned as S::LedgerHeader>::MAGIC);
 //! const _: () = S::__derive::assert_header_fields(&[<… as W>::WIDTH, …], &[… KINDS …], &[… PLACEMENT …]);
 //! const _: () = { S::__derive::header_field::<LedgerCell<Uint<8, Public>>>(); … };
@@ -48,7 +55,9 @@
 //! standard's author in a hand-written impl, and `magic()` hands out a
 //! `minocrab_std::v3::Magic`, which has a path and no write. The impl
 //! being missing is E0277 at the `assert_magic` item, with
-//! `LedgerHeader`'s own message.
+//! `LedgerHeader`'s own message. Its VALUE reaches the ledger only through
+//! the deploy state: the `InitialState` impl writes it, sealed, into the
+//! block's `initial_state()`.
 //!
 //! THINNESS RULE: paths and `const` checks only; no `Circuit3` call.
 
@@ -150,6 +159,15 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         };
 
+    let field_idents: Vec<&syn::Ident> = match &data.fields {
+        Fields::Named(named) => named
+            .named
+            .iter()
+            .filter_map(|f| f.ident.as_ref())
+            .collect(),
+        _ => Vec::new(),
+    };
+
     let field_checks = if field_types.is_empty() {
         quote!()
     } else {
@@ -190,6 +208,15 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             /// The standard's magic: its path, and no write.
             pub const fn magic(&self) -> #s::Magic {
                 #s::Magic::at_path(#magic_path)
+            }
+        }
+
+        // The deploy state: the magic at its path, SEALED (the builder's
+        // `set` refuses it), then each field's default at `[0, i + 1]`.
+        impl #s::InitialState for #name {
+            fn contribute(&self, state: &mut #s::StateBuilder) {
+                state.magic(self.magic(), &<#name as #s::LedgerHeader>::MAGIC);
+                #( #s::InitialState::contribute(&self.#field_idents, state); )*
             }
         }
 
@@ -277,6 +304,36 @@ mod tests {
         );
         assert!(expanded.contains("assert_header_fields"), "{expanded}");
         assert!(expanded.contains("assert_headed (layout)"), "{expanded}");
+    }
+
+    /// The deploy state: the magic, sealed, at its path, then every field's
+    /// own contribution — calls only.
+    #[test]
+    fn the_standard_contributes_its_magic_then_its_fields() {
+        let unit = expansion(syn::parse_quote! { struct Mip0099; });
+        assert!(
+            unit.contains(
+                "state . magic (self . magic () , & < Mip0099 as :: minocrab_std :: v3 :: LedgerHeader > :: MAGIC) ;"
+            ),
+            "{unit}"
+        );
+        assert!(!unit.contains("InitialState :: contribute"), "{unit}");
+        let named = expansion(syn::parse_quote! {
+            struct Versioned {
+                version: LedgerCell<Uint<8, Public>>,
+                admin: LedgerCell<B32<Public>>,
+            }
+        });
+        let magic = named.find("state . magic (").expect("the magic");
+        let version = named
+            .find(
+                ":: minocrab_std :: v3 :: InitialState :: contribute (& self . version , state) ;",
+            )
+            .expect("version");
+        let admin = named
+            .find(":: minocrab_std :: v3 :: InitialState :: contribute (& self . admin , state) ;")
+            .expect("admin");
+        assert!(magic < version && version < admin, "{named}");
     }
 
     fn named(n: usize) -> DeriveInput {

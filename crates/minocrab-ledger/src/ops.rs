@@ -668,6 +668,63 @@ pub fn empty_historic_merkle_tree_value(depth: u8) -> StateValue<InMemoryDB> {
     StateValue::Array([tree, next, empty_map()].into_iter().collect())
 }
 
+/// What [`historic_merkle_tree_reset_at`] LEAVES at its path: the declared
+/// initial value ([`empty_historic_merkle_tree_value`]) with the blank
+/// tree's root recorded in the history — the reset's `history_append`
+/// (`idxp [2]; dup 2; idx [0]; root; pushs null; insc 2`), evaluated. The
+/// root is the VM's own: `root` reads `MerkleTree::root` of the tree it
+/// finds, and a blank tree has one.
+///
+/// compactc's generated `initialState` runs EVERY field's `resetToDefault`
+/// (notes/ledger-abi.org "Initial state"), so this, and not the declared
+/// value, is what a fresh HistoricMerkleTree field holds at deploy — the
+/// deploy builder's contribution (minocrab-std `v3::state`), pinned against
+/// compactc's JS in project 00002's T4b: `[tree, cell 0u64, {root → null}]`.
+pub fn historic_merkle_tree_reset_value(depth: u8) -> StateValue<InMemoryDB> {
+    let [tree, next] = empty_merkle_tree(depth);
+    let StateValue::BoundedMerkleTree(ref blank) = tree else {
+        unreachable!("empty_merkle_tree's first entry is the blank tree")
+    };
+    let root = blank
+        .root()
+        .expect("a blank tree has a root: the VM's `root` op reads it the same way");
+    let history = StorageHashMap::new().insert(AlignedValue::from(root), StateValue::Null);
+    StateValue::Array([tree, next, StateValue::Map(history)].into_iter().collect())
+}
+
+/// A `Cell` holding `stored` — one byte string per atom of `atoms`, in slot
+/// order — AS THE LEDGER STORES IT: each atom in FAB normal form, its
+/// trailing zero bytes dropped (`ValueAtom::normalize`), so a `Bytes<32>`
+/// ending in NULs is kept shorter than 32 bytes and a reader pads it back.
+///
+/// The one Cell constructor of a DEPLOY state (minocrab-std `v3::state`):
+/// a slot type's default (what compactc's generated `initialState` writes
+/// with the field's `resetToDefault`) and a value a Compact constructor
+/// would have written (a standard's magic, a sealed address) both come
+/// through here, which is the same `newCell({ value: toValue(v),
+/// alignment })` compactc's JS builds.
+///
+/// Panics when the two lists differ in length or a value does not fit its
+/// atom: that is the caller's bug, not a state.
+pub fn stored_cell(atoms: Vec<AlignmentAtom>, stored: Vec<Vec<u8>>) -> StateValue<InMemoryDB> {
+    assert_eq!(
+        atoms.len(),
+        stored.len(),
+        "stored_cell: {} stored atoms for alignment {atoms:?}",
+        stored.len()
+    );
+    let value = Value(
+        stored
+            .into_iter()
+            .map(|b| ValueAtom(b).normalize())
+            .collect(),
+    );
+    let alignment = Alignment(atoms.iter().cloned().map(AlignmentSegment::Atom).collect());
+    let aligned = AlignedValue::new(value, alignment)
+        .unwrap_or_else(|| panic!("stored_cell: the value does not fit alignment {atoms:?}"));
+    StateValue::Cell(Sp::new(aligned))
+}
+
 /// `mt.resetToDefault()` on field `index`.
 pub fn merkle_tree_reset(index: u8, depth: u8) -> Vec<ImpactOp> {
     merkle_tree_reset_at(&field_path(index), depth)

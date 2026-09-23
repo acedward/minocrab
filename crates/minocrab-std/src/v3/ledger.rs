@@ -64,6 +64,11 @@ use super::{
     Secp256k1Point, ShieldedCoinInfo3, TsType, Uint, UserAddress, B32,
 };
 
+// The deploy state (`super::state`, notes/ledger-header.org).
+use super::state::{InitialState, StateBuilder};
+use midnight_onchain_state::state::StateValue;
+use minocrab_ledger::{historic_merkle_tree_reset_value, stored_cell};
+
 /// What a ledger slot's key or value type must be able to do: name its FAB
 /// atoms, hand over its limbs, and be rebuilt from the limbs a read witnesses.
 ///
@@ -98,6 +103,29 @@ use super::{
 pub trait LedgerRepr: Sized {
     /// This type's FAB atoms, in slot order.
     fn atoms() -> Vec<AlignmentAtom>;
+
+    /// This type's DEFAULT — Compact's `default<T>` — as the ledger STORES
+    /// it in a `Cell`: one byte string per [`LedgerRepr::atoms`] entry, in
+    /// slot order. What compactc's generated `initialState` writes into a
+    /// fresh `Cell<Self>` with the field's `resetToDefault`, and so what the
+    /// deploy builder puts there ([`super::StateBuilder`],
+    /// notes/ledger-header.org). The builder stores each atom in FAB normal
+    /// form, so full-width zeros and the empty atom are one value.
+    ///
+    /// ZERO in every atom — this provided body — for every type but the two
+    /// curve points, whose Compact default is their group IDENTITY and not
+    /// zero ([`Secp256k1Point`] and [`JubjubPoint`] override it; compactc's
+    /// JS writes `{x: 0, y: 0, identity: true}` and `{x: 0, y: 1}`). A
+    /// composite of other `LedgerRepr` types is its fields' defaults in
+    /// order, which `#[derive(LedgerRepr)]` emits; a hand-written composite
+    /// holding a point overrides this the same way. (`Maybe` and `Either`
+    /// cannot hold a point at all: a point is not a `CallResult`.)
+    ///
+    /// Off-chain only: no circuit reads this — a circuit's own default is
+    /// [`minocrab_ledger::default_value`]'s zero limbs.
+    fn default_stored() -> Vec<Vec<u8>> {
+        Self::atoms().iter().map(|_| Vec::new()).collect()
+    }
 
     /// This value's limbs, in slot order.
     ///
@@ -246,6 +274,22 @@ impl LedgerRepr for Secp256k1Point<Public> {
         <Secp256k1Point<Public> as CircuitAbi>::atoms()
     }
 
+    /// Compact's default point, `{x: 0, y: 0, identity: true}`, as
+    /// compact-runtime 0.19.0 stores it: each coordinate goes through the
+    /// ZKIR representation's `v − 1 mod p` (so 0 is `p − 1`), low 192 bits
+    /// then high 64, and the identity flag is the `field` atom 1
+    /// (`CompactTypeSecp256k1Base.toValue`, runtime `compact-types.ts`).
+    /// Pinned against compactc's own `initialState` by the T4b oracle
+    /// fixture (`tests/fixtures/initial_state/e_adts.state.hex`).
+    fn default_stored() -> Vec<Vec<u8>> {
+        // p − 1 = 0xFFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFE_FFFFFC2E,
+        // little-endian.
+        let mut low192 = vec![0xff; 24];
+        low192[..5].copy_from_slice(&[0x2e, 0xfc, 0xff, 0xff, 0xfe]);
+        let high64 = vec![0xff; 8];
+        vec![low192.clone(), high64.clone(), low192, high64, vec![1]]
+    }
+
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
         limbs.extend(c.encode(self.point()));
     }
@@ -296,6 +340,13 @@ impl ProofWires for JubjubPoint<Public> {
 impl LedgerRepr for JubjubPoint<Public> {
     fn atoms() -> Vec<AlignmentAtom> {
         <JubjubPoint<Public> as CircuitAbi>::atoms()
+    }
+
+    /// Compact's default point is the curve's identity, `{x: 0, y: 1}`
+    /// (compactc's JS), stored as its two `field` atoms. Pinned by the T4b
+    /// oracle fixture beside [`Secp256k1Point`]'s.
+    fn default_stored() -> Vec<Vec<u8>> {
+        vec![Vec::new(), vec![1]]
     }
 
     fn push_limbs(&self, c: &mut Circuit3, limbs: &mut Vec<Wire3<FieldT, Public>>) {
@@ -1400,6 +1451,12 @@ impl<T> LedgerSet<T> {
         }
     }
 
+    /// The declared slot's path — what the deploy builder's
+    /// [`super::StateBuilder::set`] takes to replace its initial value.
+    pub const fn field_path(&self) -> FieldPath {
+        self.path
+    }
+
     /// The ledger field index.
     pub const fn index(&self) -> u8 {
         self.path.index()
@@ -1530,6 +1587,12 @@ impl<T> LedgerList<T> {
             path: FieldPath::of(path),
             _t: PhantomData,
         }
+    }
+
+    /// The declared slot's path — what the deploy builder's
+    /// [`super::StateBuilder::set`] takes to replace its initial value.
+    pub const fn field_path(&self) -> FieldPath {
+        self.path
     }
 
     /// The ledger field index.
@@ -1708,6 +1771,12 @@ impl<const DEPTH: u8, T> LedgerMerkleTree<DEPTH, T> {
         }
     }
 
+    /// The declared slot's path — what the deploy builder's
+    /// [`super::StateBuilder::set`] takes to replace its initial value.
+    pub const fn field_path(&self) -> FieldPath {
+        self.path
+    }
+
     /// The ledger field index.
     pub const fn index(&self) -> u8 {
         self.path.index()
@@ -1837,6 +1906,12 @@ impl<const DEPTH: u8, T> LedgerHistoricMerkleTree<DEPTH, T> {
             path: FieldPath::of(path),
             _t: PhantomData,
         }
+    }
+
+    /// The declared slot's path — what the deploy builder's
+    /// [`super::StateBuilder::set`] takes to replace its initial value.
+    pub const fn field_path(&self) -> FieldPath {
+        self.path
     }
 
     /// The ledger field index.
@@ -2015,6 +2090,12 @@ impl<T> LedgerCell<T> {
         }
     }
 
+    /// The declared slot's path — what the deploy builder's
+    /// [`super::StateBuilder::set`] takes to replace its initial value.
+    pub const fn field_path(&self) -> FieldPath {
+        self.path
+    }
+
     /// The ledger field index.
     pub const fn index(&self) -> u8 {
         self.path.index()
@@ -2059,6 +2140,12 @@ impl LedgerCounter {
         LedgerCounter {
             path: FieldPath::of(path),
         }
+    }
+
+    /// The declared slot's path — what the deploy builder's
+    /// [`super::StateBuilder::set`] takes to replace its initial value.
+    pub const fn field_path(&self) -> FieldPath {
+        self.path
     }
 
     /// The ledger field index.
@@ -2158,6 +2245,72 @@ impl LedgerField {
     /// their own ops below this layer.
     pub fn ledger_path(&self) -> Vec<LedgerKey> {
         self.path.to_path()
+    }
+}
+
+// ---- the deploy state (notes/ledger-header.org) -----------------------------------
+//
+// Each declared slot's initial value, at its own path: the constants the
+// slot's `resetToDefault` pushes (the `empty_*` values above), and a Cell's
+// type default ([`LedgerRepr::default_stored`]) — what compactc's generated
+// `initialState` leaves in each field. `super::state` assembles the tree.
+
+/// `x: T` — `T`'s default, stored (a `Bytes<32>` of zeros is the empty atom).
+impl<T: LedgerRepr> InitialState for LedgerCell<T> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, stored_cell(T::atoms(), T::default_stored()));
+    }
+}
+
+/// `n: Counter` — `cell 0u64`.
+impl InitialState for LedgerCounter {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, empty_counter());
+    }
+}
+
+/// `m: Map<K, V>` — the empty map.
+impl<K, V> InitialState for LedgerMap<K, V> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, empty_map());
+    }
+}
+
+/// `s: Set<T>` — the empty map, as a `Map`'s.
+impl<T> InitialState for LedgerSet<T> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, empty_map());
+    }
+}
+
+/// `l: List<T>` — `[null, null, cell 0u64]`.
+impl<T> InitialState for LedgerList<T> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, empty_list());
+    }
+}
+
+/// `t: MerkleTree<DEPTH, T>` — `[blank tree, cell 0u64]`.
+impl<const DEPTH: u8, T> InitialState for LedgerMerkleTree<DEPTH, T> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, empty_merkle_tree_value(DEPTH));
+    }
+}
+
+/// `t: HistoricMerkleTree<DEPTH, T>` — what its `resetToDefault` LEAVES: the
+/// declared value with the blank root already in the history.
+impl<const DEPTH: u8, T> InitialState for LedgerHistoricMerkleTree<DEPTH, T> {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, historic_merkle_tree_reset_value(DEPTH));
+    }
+}
+
+/// An untyped field has no default this layer could know: it is declared
+/// Null, which keeps its place in the skeleton, and the deployer
+/// [`StateBuilder::set`]s whatever a Compact constructor would write.
+impl InitialState for LedgerField {
+    fn contribute(&self, state: &mut StateBuilder) {
+        state.slot(self.path, StateValue::Null);
     }
 }
 
