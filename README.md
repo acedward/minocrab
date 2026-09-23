@@ -239,6 +239,24 @@ VAULT.sign_bidirectional_event_map.insert(c, &request_id, &record);
 let exists = VAULT.sign_bidirectional_event_map.member(c, &request_id);
 ```
 
+**Ledger header** — a standard claims the ledger's first block, whatever the contract. A type with `#[derive(LedgerHeader)]` and a 32-byte `MAGIC` sits at `root[0]` of every `#[derive(Ledger)]` block that embeds it, wherever it is declared. A magic-only standard is a Cell at `[0]`; one with fields is an Array at `[0]`, with the magic at `[0, 0]`. The contract's own fields keep compactc's layout moved one root slot along (`BlockLayout`, `Placement`), at the same depth, so every circuit costs the same `(k, rows)` with or without it. Every derived block also builds its deploy state: `initial_state()`, a `StateBuilder` whose output is byte-equal to compactc's generated `initialState` (`InitialState`). The magic is written there, and no circuit can write it (`Magic` has no write). `discriminator`, `contract_state_discriminator` and `implements` read it back from any contract's state with no per-contract code. Compact can put a field first only by declaration order, and that field moves from `[0]` to `[0, 0]` at 16 fields; a module cannot write its own `sealed` field. A magic is a claim, not proof: pair it with a verifier-key check. Up to 14 own fields, a headed contract is its magic-first Compact twin byte for byte ([header_small_differential.rs](crates/minocrab-contracts/tests/header_small_differential.rs)). Gated on the in-process ledger's deploy and VM ([ledger_deploy.rs](crates/minocrab-contracts/tests/ledger_deploy.rs)); design and limits in [notes/ledger-header.org](notes/ledger-header.org) (fork work).
+
+```compact
+export sealed ledger magic: Bytes<32>;   // declared first: [0] up to 15 fields, [0, 0] from 16
+constructor() { magic = pad(32, "mip-0099:ledger-header[v1]"); }   // every contract must remember it
+```
+```rust
+#[derive(LedgerHeader)]
+struct Mip0099;                                    // the standard: root[0] in every contract
+impl LedgerHeader for Mip0099 { const MAGIC: [u8; 32] = pad32(b"mip-0099:ledger-header[v1]"); }
+
+#[derive(Ledger)]
+struct Vault { value: LedgerCell<Uint<64, Public>>, std: Mip0099, count: LedgerCounter }   // [1], [0], [2]
+
+let state = Vault::initial_state().build();        // compactc's initialState, the magic already in it
+assert!(implements::<Mip0099>(&state));            // root[0], index 0 down, one bytes<32> atom
+```
+
 **Conditional effects** — reads, witnesses and assertions inside the scope inherit the guard.
 
 ```compact

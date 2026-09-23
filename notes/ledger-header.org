@@ -1,0 +1,233 @@
+#+title: Ledger headers: a standard claims root[0]
+
+FORK WORK, not a decision of record upstream: built on branch =00002-minocrab-ledger-header= of acedward/minocrab (project 00002), based on upstream =main= @ =9f4d6a6=, 2026-09-23. Every decision below was taken in the fork without dmd and is listed in "Decisions taken in the fork" for his review. Target: Midnight 2.x through the workspace's pins (compactc 0.34.0, midnight-ledger rev =04c9c5d9=, ZKIR v3). Milestone: "Ledger header (fork)" in milestones.org.
+
+Sources the citations below point into, all public: compactc = https://github.com/LFDT-Minokawa/compact at tag =compactc-v0.34.0= (=1f671fc2=); midnight-ledger = https://github.com/midnightntwrk/midnight-ledger at tag =ledger-9.1.0.0-rc.3= (=4823b535=; the workspace pins rev =04c9c5d9=, rc.3 plus 103 commits with the same state and VM code); compact-runtime 0.19.0, the runtime compactc 0.34.0 targets; the MIPs at https://github.com/midnightntwrk/midnight-improvement-proposals; notes/*.org here as of the base.
+
+* The rule, stated once
+
+A STANDARD is a Rust type its author publishes once: =impl LedgerHeader for S { const MAGIC: [u8; 32] = pad32(b"…"); }= beside =#[derive(LedgerHeader)]=. A =#[derive(Ledger)]= block that embeds one, as a field declared anywhere, is laid out HEADED:
+
+- =root[0]= is the standard's. Nothing else in the block can be there.
+- The block's OWN fields (the body) keep compactc's layout of those fields alone, moved one root slot along: compactc's segmentation (=batch=, remainder first, fifteen wide) over the body's flat width, then =+1= on every path's FIRST element. Depths are compactc's for the same body count, so no body field pays for the header.
+- The root holds =1 + R(n)= entries, where =R(n)= is compactc's root width for an n-field body (=n= up to 15, =ceil(n/15)= from 16 to 225, 2 from 226 to 256). =R(n) <= 15= always, so the root never passes the ledger's sixteen.
+
+| own fields n | compactc, no standard | headed | root entries, headed |
+|---|---|---|---|
+| 3 | =[0] [1] [2]= | =[1] [2] [3]= | 4 |
+| 15 | =[0]..[14]= | =[1]..[15]= | 16 |
+| 16 | =[0,0]=, =[1,0..14]= | =[1,0]=, =[2,0..14]= | 3 |
+| 225 | =[0..14, 0..14]= | =[1..15, 0..14]= | 16 |
+| 226 | =[0,0,0]=, =[1,*,*]= | =[1,0,0]=, =[2,*,*]= | 3 |
+
+The machinery is one value per block. =BlockLayout= (fields private: =compactc(total)=, =headed(total)=, =of_block(total, standards)=) is what =FieldPath::in_layout(layout, index)= segments by. =#[derive(Ledger)]= emits =__HEADERS = standards(&[<T as LedgerWidth>::PLACEMENT, …])= and =__LAYOUT = BlockLayout::of_block(__TOTAL, __HEADERS)=, then =<T>::at_layout(__LAYOUT, start)= per field. A standard's =LedgerWidth= is =WIDTH = 0=, =PLACEMENT = Placement::RootHeader=, so the width sums that were already there leave it out of the body without being told; the expansion never names a standard. Every group slot (=Signet=, =evm_flow::{Pending, Fired}=, =Outbox=, =Stream=, the blind =Primitive= handles) passes the layout on to its members. =Stream= stores the layout instead of =total=. =at_block(total, start)= is still there everywhere and is =at_layout(BlockLayout::compactc(total), start)=, so a block without a standard is compactc's layout path for path.
+
+FROZEN, on purpose. A headed body is segmented by its own constant =HEADED_SEGMENT = 15=, not by =SEGMENT= (the compactc mirror). The two are equal today. compactc's =maximum-ledger-segment-length= carries a FIXME to take the ledger's value (compact =compactc-v0.34.0=, =compiler/langs.ss:850-855=). If it ever moves to sixteen, default blocks follow compactc (differential parity) and headed contracts do not move. Fifteen is also what makes the header fit: =1 + 15= is the ledger's Array bound. Pinned by =the_headed_segment_is_frozen_at_fifteen=.
+
+* Why
+
+compactc's layout moves when a field is added, and its FRONT is the least stable part:
+- Fields go into one root Array in declaration order, in fifteen-wide segments, remainder first (=compiler/analysis-passes/determine-ledger-paths.ss:24-47=). The first field is =[0]= up to 15 fields, =[0,0]= from 16 to 225 and =[0,0,0]= from 226. No field's path is independent of the field count, the first one included.
+- Going from 15 to 16 fields moves all 15 existing paths, whether the new field is appended or inserted first. The remainder chunk is =root[0]=, so what sits first is what moves most.
+- The order is not even promised: the pass that sorts the fields says a specific ordering "is not required for correctness" (=compiler/analysis-passes/expand-modules-and-types.ss:1000-1004=).
+- No compactc feature controls placement (no attribute, pragma or modifier beyond =export= and =sealed=).
+- So "declare the magic first" gives a magic whose path depends on the size of the contract. A header must sit OUTSIDE =batch=.
+
+The spare root slot is real:
+- The ledger's Array holds sixteen entries. =StateValue::Array= is documented =0 <= len <= 16= and its invariant rejects more (midnight-ledger =ledger-9.1.0.0-rc.3=, =onchain-state/src/state.rs:83-87=, =:417-424=), and the VM's =new= refuses only a length above 16 (=onchain-vm/src/vm.rs:506-519=). minocrab's pin =04c9c5d9= is rc.3 plus 103 commits, and its state and VM code are identical.
+- compactc's fifteen is a stale mirror of an older ledger limit. The ledger's own spec said =Array(n)= for =n <= 15= until commit =cb4488078bb5= (2025-11-27) raised it to sixteen. compactc never followed, and its path language admits only indices below fifteen (=langs.ss:852-855=).
+- One live path still enforces fifteen: the JS/WASM builder =StateValue.arrayPush= refuses a sixteenth push ("Push would cause array to exceed 15 elements", =onchain-runtime-wasm/src/state.rs:266-287=). compactc's generated =initialState= builds every root with it (=compiler/typescript-passes/print-typescript.ss:1065-1090=). So a compactc contract never has a sixteen-entry Array, and index 15 of the root is free relative to every compactc layout.
+
+Why =root[0]= plus the shift, against the alternatives:
+
+| option | cost for the body | the magic | why not |
+|---|---|---|---|
+| *root[0], body moved one slot along (taken)* | none: the same depth at every size | =[0]= / =[0,0]= | needs a sixteen-entry root at n = 15 and 211–225 (below) |
+| header at =root[15]=, compactc's layout untouched | none | =[15]= | not the first block; the root is ALWAYS sixteen entries, so it is never buildable by =arrayPush=; if compactc moves to sixteen the slot is no longer free |
+| =root = [header, compactc's whole root]= | every access one level deeper, forever: +3 public-input elements per op, +5 per cell write | =[0]= | a tax on every circuit, and =MAX_FIELD_PATH= would have to become 4 (=MAX_NESTING= 9 for everyone) |
+| h flat header entries at =[0..h)= | free only while =h + R(n) <= 16=; at =17 - h <= n <= 15= the body goes one level deeper | =[0]= | not free at every size |
+| convention only: magic declared first | none | =[0]=, =[0,0]= or =[0,0,0]= by size | the path depends on the contract's size; the standard's other fields have no fixed place |
+
+The prior art says the same thing in other media. The header takes the one position the compiler's allocation cannot move: C's first member (no padding before it), ELF's =e_ident= at offset 0, and Vyper, which always reserves its first storage slot so that its layout does not shift. The standard's own fields nest inside one header entry: CPython's object head, the C++ base-class subobject. Identity comes first, with the version beside it.
+
+* Header shapes
+
+- A UNIT struct is magic-only: a Cell at =[0]=. For a small contract this is exactly compactc's layout of a Compact twin that declares the magic first (see "compactc parity").
+- A struct with NAMED fields is an Array at =[0]= of =1 + n= entries: the magic at =[0,0]=, field =i= at =[0, i+1]=, and =n <= 15=. Each field is one of the eight single-field std slots (=LedgerCell=, =LedgerCounter=, =LedgerMap=, =LedgerSet=, =LedgerList=, =LedgerMerkleTree=, =LedgerHistoricMerkleTree=, =LedgerField=). The sealed marker trait =HeaderField= says so, and each field is read and written through its ordinary typed API. A header field is at depth 2, so a circuit touching it pays the depth-2 premium (+3 elements per op, +5 per cell write). The magic itself is never touched by a circuit.
+- A header's paths are the same in every block: =[0]=, or =[0,0]= and =[0, i+1]=. The standard's =at_layout(layout, _start)= asserts that =layout.is_headed()= and ignores =start=.
+- The magic is not a field. =magic()= returns a =Magic= handle carrying only =field_path()=: no =write=, no =reset_to_default=, and no in-circuit =read=. A circuit that needs the value has the constant =<S as LedgerHeader>::MAGIC=. =Magic::read(c)= is deliberately not offered. A sound "never stale" read would rest on no circuit ever writing =root[0]=, which a maintenance update can break (see "Limits"). And the one thing a read could tell a circuit, whether the magic is there, is the constant.
+- =pad32(b"…")= is Compact's =pad(32, "…")= in =const= (E0080 above 32 bytes). The tests' placeholder is =pad32(b"mip-0099:ledger-header[v1]")=: NUL-padded lowercase ASCII with a bracketed version, the house style of the ledger's own =[vN]= tags. It is a PLACEHOLDER. MIP numbers are assigned by the MIP editors, so 0099 is not reserved, and a future MIP fixes the real format. Do not deploy it outside test networks.
+
+* Rejected at compile time
+
+The house order: missing impl or trait bound first, then E0080. Each rejection has a =compile_fail= doctest, on the =LedgerHeader= derive's re-export in =v3.rs= and on =signet_flow::Signet=. A =compile_fail= doctest passes on ANY error, so each one's message was also read from a real compile:
+
+| mistake | error |
+|---|---|
+| two standards in one block, or the same standard twice | E0080 "one standard per ledger block …", from =standards= in =new()= and at module level, so it holds even when =new()= is never evaluated |
+| an all-zero magic (what an unset =Bytes<32>= holds) | E0080 "a standard's MAGIC is all zero bytes …" |
+| a standard with 16 named fields (1 + 16 > 16) | the derive's spanned error "a standard has at most 15 named fields …" |
+| a group slot (=Stream=, =Signet=, =Pending=…) or another standard as a standard's field | E0277 "`X` cannot be a field of a ledger standard" (=HeaderField=), and the E0080 backstop in width terms |
+| =#[derive(LedgerHeader)]= without =impl LedgerHeader= | E0277 "`X` is laid out as a ledger standard but names no magic" |
+| =struct S {}=, or a field named =magic= | derive errors: write a unit struct; the magic is not a field |
+
+* The deploy state
+
+minocrab had no deploy-state producer: deployed contracts used compactc's generated JS with minocrab's =.zkir= swapped in (notes/mpc-publisher.org). A headed contract of 15 or more own fields, or one with a multi-field standard, has no compactc twin to borrow a JS =initialState= from. So every =#[derive(Ledger)]= block, headed or not, now has =initial_state() -> StateBuilder=. It is calls and paths only, per the THINNESS RULE: the derive hands every field to =InitialState::contribute=, which writes the slot's initial value at its own path, and =build()= assembles the tree. Each Array is as long as its highest index plus one, and every entry nothing contributed to is Null. compactc's layouts are dense, so that IS its skeleton.
+
+It is compactc's =initialState=, built without the VM. compactc builds a Null skeleton with =arrayPush=, runs every field's =resetToDefault= through the VM, then runs the constructor (=print-typescript.ss:1092-1110=, =:1738-1777=; notes/ledger-abi.org "Initial state"). The builder writes each reset's RESULT directly, taken from the constants the circuits' own reset ops push. The values live in minocrab-ledger beside the =empty_*= those ops use (=stored_cell=, =historic_merkle_tree_reset_value=). The typed builder lives in minocrab-std (=v3/state.rs=), because it is keyed by =FieldPath= and the derive names only =::minocrab_std::v3=.
+
+Facts the oracle turned up. The oracle is compactc 0.34.0's generated =initialState= run on compact-runtime 0.19.0 in node, with fixtures at =tests/fixtures/initial_state/=:
+- EVERY field's reset runs, so a =HistoricMerkleTree= starts with ONE history entry, the blank root, not with the empty history it is declared with.
+- A curve point's Compact default is its group IDENTITY, not zero. compactc's JS resets a =Cell<Secp256k1Point>= to ={x: 0, y: 0, identity: true}=, stored as =(p−1 low 192, p−1 high 64, p−1 low 192, p−1 high 64, 1)= because the runtime stores =v − 1 mod p=, and a =Cell<JubjubPoint>= to =(0, 1)=. compactc's IN-CIRCUIT default (=default<T>=, zero limbs, which =minocrab_ledger::default_value= and =insertDefault= reproduce) is not that: compactc disagrees with itself. The builder follows the JS, because the JS is the deploy path. =LedgerRepr::default_stored= is a provided method (zeros per atom), overridden by the two points and composed by =#[derive(LedgerRepr)]=. It is off-chain only: no circuit reads it. (A consequence for the vault hand models: they started the MPC key Null, a test simplification; compactc starts it at the identity.)
+- Every other type's default is the empty atom per atom (=Maybe=, structs, =Opaque= (compress), =MerkleTreeDigest= (field)).
+- Result: the builder's state is BYTE-EQUAL to compactc's serialized =initialState= for one field of every ledger type (=e_adts=, 1074 bytes), the shipped =Adts= contract (700 bytes), the magic-first probes of 1, 16 and 226 fields (147, 481, 625 bytes) and the parity fixtures (below). It also equals both vault hand models, with the MPC key given compactc's value.
+
+Sixteen-entry roots. At 15 and at 211–225 own fields a headed root has sixteen entries. The ledger accepts them: the deploy gate applies them, at 15 and 225, through =well_formed= and =apply=. JS =arrayPush= cannot build them. =StateValue.decode= and =ContractState.deserialize= carry sixteen, and seventeen is rejected on deserialize. So such a contract deploys from minocrab's builder, or from a JS tool that decodes instead of pushing, and NEVER from compactc's generated JS. Any JS tool that REBUILDS such a state with =arrayPush= breaks; one that only reads it (=asArray()=) does not.
+
+=set(path, value)= replaces a declared slot's value. It is for what a Compact constructor would write (a sealed signer address, an owner) and for a stream accumulator that must start at its step's identity. It refuses, by PANIC with a message naming the rule:
+- a path the block does not declare, or a path inside a slot;
+- a value of another shape (a Cell of another alignment, so that the circuits' reads still match; a Cell for a Map);
+- the standard's magic (sealed: it is the standard's constant).
+An untyped =LedgerField= is Null until =set=, since the builder cannot know its type, and any value may replace it.
+Why panic and not a compile error or a =Result=: the path and the value are run-time inputs of a deploy tool, so nothing about them is const-known, and each refusal is a programming error rather than a condition a caller handles. A panic keeps =s.set(a, x).set(b, y)= fluent and matches the crate's existing assert style (=FieldPath::of=). RECORDED FOR DMD per CLAUDE.md ("build-time panic only for genuinely value-dependent checks, with a prescriptive message"). If a long-running deploy service appears, a =Result<_, SetError>= variant is a small follow-up.
+
+Blind stream accumulators start at their cells' DEFAULT (0, false): the identity of =Add=, =Max= and =Or=, but NOT of =Min= (the identity is the maximum) or =And= (the identity is true). A =Min= or =And= stream deployed without =set= stays absorbed forever. This is documented on =impl InitialState for Stream= and in =v3::state=. No shipped contract uses one; the sig-net outbox is =(Add, Max)=.
+
+=InitialState= is a new requirement: every slot type of a derived block implements it. All in-tree ones do: the eight std slots, tuples to 4, =FirstAcc=, =Stream= (through a new required =Step::contribute=), =Signet=, =Pending=, =Fired=, =Outbox=, and every standard through its derive. A =Pending=, =Fired= or =Outbox= does NOT contribute its copy of the block's Signet; the =Signet= field does. A downstream custom slot without the impl gets E0277 with the trait's =on_unimplemented= message ("Compatibility" below).
+
+Test support: =crates/minocrab-contracts/tests/ledger_deploy/deploy.rs= wraps a state into =ContractState= / =ContractDeploy=, checks the ledger's =well_formed= and applies it to an in-process =LedgerState=.
+
+* The reader
+
+=v3::discriminator(&StateValue) -> Option<[u8; 32]>=, =v3::contract_state_discriminator(&[u8]) -> io::Result<Option<[u8; 32]>>= (tagged, serialized =ContractState=, =midnight:contract-state[v8]:=) and =v3::implements::<S: LedgerHeader>(&StateValue) -> bool=. The rule, which is all of it and is the same for every reader in any language:
+
+1. Take =root[0]=, then index 0 again while the node is an Array: at least ONE step (the root is the block and its entries are the fields) and at most THREE.
+2. The node reached must be a Cell whose alignment is exactly ONE =bytes<32>= atom, holding one atom of at most 32 bytes.
+3. Right-pad that atom to 32 bytes. That is the discriminator. The ledger stores a =Bytes<32>= in FAB normal form, with trailing zero bytes dropped (midnight-ledger =base-crypto/src/fab/conversions.rs:272-280=): the placeholder is stored as 26 bytes.
+4. Anything else is =None=: a first leaf that is Null, a Map, a List or a Merkle tree, a Cell of any other alignment (a Counter's =bytes<8>=, a =Bytes<16>=, a =Maybe= or a struct of several atoms), a root that is not an Array or is empty, or an Array still there at the fourth step.
+
+=MAX_STEPS = 3= is its own FROZEN constant, const-asserted equal to =MAX_FIELD_PATH=. If the layout's bound ever moves, the build fails, so the reader's rule changes on purpose or not at all (the same idea as =HEADED_SEGMENT=).
+
+One rule finds a minocrab header of either shape (=[0]=, =[0,0]=) and a plain Compact contract that declares or imports a =Bytes<32>= magic first, at every size (=[0]=, =[0,0]=, =[0,0,0]=): compactc's field 0 is always the leftmost leaf. The reader keeps no registry. A contract whose first leaf happens to be another 32-byte cell (an owner key, or 32 zero bytes never written) yields that value, and matching it against known magics is the caller's job (=implements= does it for one standard). The all-zero value is reserved as "no standard", which is why a zero =MAGIC= does not compile.
+
+The bytes variant deserializes the WHOLE =ContractState= (every verifier key and all of =data=) to read one leaf. That is fine off-chain, and it is what readers have anyway: the node's =midnight_contractState= and the indexer's =state= both return the whole tagged state. =tagged_deserialize= refuses every truncation, trailing bytes and any other tag, so the reader needs no length check of its own. A path-level read waits on MIP-0009 ("Lazy Contract State Query RPC", Proposed; midnight-node PR #1078, draft), where =root[0]= is the path =["0x4001"]=.
+
+* compactc parity
+
+A magic-only standard with at most 14 own fields IS the Compact twin that declares the magic first: its layout, every circuit's canonical ZKIR, its =initialState= and its WHOLE =ContractState= (with compactc's operations registered) are compactc 0.34.0's, byte for byte. The gate is =tests/header_small_differential.rs=, at 4 own fields (=header_small=: 323-byte state, 519-byte whole =ContractState=) and at 14 (=header_n15=, compactc's widest flat root: 410 bytes). The reader finds the magic in compactc's own serialized states, operations included.
+
+The Compact twin is written in one of two ways:
+- =export sealed ledger magic: Bytes<32>;= as the first ledger declaration;
+- or a FILE module declaring it, imported ANYWHERE in the file. A file module's fields sort before all of the main file's own fields. An INLINE module sits where it is written instead.
+Either way the CONTRACT's constructor must write =magic = pad(32, "…")=, directly or through a module circuit:
+- a module cannot declare a constructor ("misplaced constructor", =expand-modules-and-types.ss:833-837=);
+- =sealed= forbids an exported circuit from reaching the write (=check-sealed-fields.ss=);
+- forgetting the write is not an error: the magic stays 32 zero bytes, which the reader returns as the "no standard" value.
+The module form is checked by compiling probes, not by a committed fixture: the same field indices, and a circuit byte-identical to =header_small='s.
+
+At 15 own fields parity ends, by exactly the root shape: the negative control =header_n16=. The twin's 16 fields segment (magic =[0,0]=, =fK= at =[1, K−1]=), while the headed layout stays flat (=[0]=, =[K]=). No path is shared, and =wLast= differs only by its path. The states hold the same sixteen leaves in the same order; re-nesting minocrab's leaves gives compactc's bytes. From 15 own fields up a Compact team cannot reproduce a headed contract, and a multi-field header is never compactc's layout. Both are minocrab-native layouts, like =erc20_vault_pending=.
+
+One more detail from the parity gate: comparing states alone cannot tell a =Uint<64>= Cell from a Counter, because both default to an empty =bytes<8>= Cell. This is why the gate also compares the layout and the ZKIR: swapping two such fields is caught by those and not by the state.
+
+* Cost
+
+T8 (=tests/ledger_header.rs=), priced by =minocrab_sim::v3::cost=, =row_snapshot='s measure. The probe is four ledger ops: a Cell read and a Cell write on body field 0, a Counter increment on field =n/2=, a Map insert on field =n − 1=. It is built as an exported entry point is (=finish(true)=). =(k, rows, instructions)= at the pinned toolchain:
+
+| own fields n | headed | the same body, no header | magic declared first (compactc, n + 1 fields) |
+|---|---|---|---|
+| 3, 4, 14 | (7, 68, 15) | (7, 68, 15) | (7, 68, 15), the same circuit |
+| 15 | (7, 68, 15) | (7, 68, 15) | (7, 82, 17): depth 2 |
+| 16, 30, 31, 211, 224 | (7, 82, 17) | (7, 82, 17) | (7, 82, 17) |
+| 225 | (7, 82, 17) | (7, 82, 17) | (7, 94, 17): depth 3 |
+| 226, 255 | (7, 94, 17) | (7, 94, 17) | (7, 94, 17) |
+| 256 | (7, 94, 17) | (7, 94, 17) | (257 fields: none) |
+
+- WITH AND WITHOUT A HEADER THE COST IS EQUAL at every size, and so is the instruction count, asserted as equality and not within a tolerance. The header moves every body path one root slot along at the same depth, which changes index immediates and never an instruction. The research had allowed one or two rows for Midnight's fixed-constant cache; the cost model shows none.
+- The headed treasury's =send=, =complete= and =refund= cost exactly what the shipped treasury's do: (11, 1619), (15, 25611) and (15, 26009), with 81, 104 and 127 instructions.
+- Against a magic declared as an ordinary first field, the header is never dearer. At 15 own fields it is 2 instructions and 14 rows CHEAPER: the twin is at depth 2, adding +5 public-input elements for the cell write's =idxp= and =insc= and +3 for each other op's longer path. At 225 it is 12 rows cheaper (depth 3 against 2, +3 per op). =k= is equal throughout. The negative control's one-op =wLast= is 3 instructions headed against 5, and 5 rows apart.
+
+* Limits
+
+- A MAGIC IS A CLAIM, NOT PROOF.
+  - The deploy transaction carries the initial state as it is (=ContractDeploy { initial_state, nonce }=, midnight-ledger =ledger/src/structure.rs:2761-2784=).
+  - The ledger's well-formedness checks the operations' keys, the authority's counter, zero balances and the charged-state bookkeeping, not what the tree holds or where (=ledger/src/verify.rs:1754-1799=). No proof covers the constructor.
+  - Anyone can deploy any state with any magic. What says a contract RUNS a standard's code is its verifier keys: pair the read with a verifier-key comparison where it matters.
+- MAINTENANCE can install a circuit that writes =root[0]=. =VerifierKeyInsert= / =IrInsert= change the operations; no update touches =data= (=structure.rs:2951-2968=, =ledger/src/semantics.rs:1550-1656=), so the magic survives only as long as no installed circuit writes it.
+  - A reader that relies on the magic re-reads after every =ContractUpdate=, or requires a FROZEN authority: an empty committee with a threshold of at least one, which is the ledger's default =ContractMaintenanceAuthority::new()= (=onchain-state/src/state.rs:730-738=; the threshold check is =verify.rs:1843-1862=).
+  - An empty committee with threshold 0 would let an unsigned update through.
+- One standard per contract. Several standards (a namespace Map at =root[0]= keyed by standard id) are a possible follow-up, not this.
+- A standard's other fields are ordinary writable slots. A general sealed or =Config<T>= cell kind is the open follow-up in notes/hooks-design.org, a decision reserved for dmd.
+- Contracts with hand-written =u8= paths (the non-derive ones) are unaffected and cannot opt in.
+- No Compact language feature: plain Compact reaches the header's layout only up to 14 own fields, and only by declaring or importing the magic first.
+
+* Compatibility
+
+Blocks without a standard do not move. The ZKIR dump of all 214 shipped circuits is byte-identical to the base at every commit of the branch, and =interface_snapshot= passes. =row_snapshot= and =taint_lint= fail exactly as they already fail at the base, with the same text; the branch neither causes nor hides that. Every existing contract compiles unchanged, and every =at_block= / =at_block_with_signet= constructor still exists and returns the same value.
+
+No item of the M24 STABLE tier changes (the eDSL authoring core, the typed leaves, the =Pass= trait, the measurement API; notes/library-api.org §1). The ledger-declaration surface is "not yet under a stability promise" (=minocrab-std= crate docs), and on it four extension points change in ways that break an OUT-OF-TREE implementor:
+
+1. =v3::Primitive= (blind steps): =acc_at_layout= and =snapshot_at_layout= are the required methods now, and =acc_at_block= / =snapshot_at_block= are provided and delegate to them. =Acc= and =Snapshot<K>= must implement =InitialState=. Migration: take a =BlockLayout= and build the handles with =at_layout=; implement =InitialState= for the handles.
+2. =v3::Step= (documented "not for authors") has a new required =contribute(&Stream<P>, &mut StateBuilder)=.
+3. =#[derive(Ledger)]= builds every field with =<T>::at_layout(layout, start)= (or =at_layout_with_signet=) and calls =InitialState::contribute= on it. A custom group slot adds =const fn at_layout(BlockLayout, usize)= (its =at_block= can delegate with =BlockLayout::compactc(total)=) and an =InitialState= impl.
+4. =#[derive(Ledger)]= adds an inherent =initial_state()= to the block; an inherent =initial_state= of the block's own collides (E0592).
+
+Minor, additive or defaulted: =LedgerWidth::PLACEMENT= (default =Body=), =LedgerRepr::default_stored= (provided), the new items (=BlockLayout=, =Placement=, =standards=, =FieldPath::in_layout=, =at_layout= and =field_path()= on the slots, =LedgerHeader=, =pad32=, =Magic=, =HeaderField=, =InitialState=, =StateBuilder=, the reader), and three normal dependencies of minocrab-std that were already in the lock through minocrab-ledger (=midnight-onchain-state=, =midnight-storage=, =midnight-serialize=). The workspace is 0.1.0 and unpublished, so a publish after this is a 0.1 → 0.2 bump. The PR says BREAKING (unstable tier only).
+
+* Decisions taken in the fork (for dmd)
+
+Each is DECIDED for the fork and open to reversal; the alternative is on the right.
+
+| decision | taken | the alternative |
+|---|---|---|
+| where the header sits | =root[0]=, body moved one slot along | =root[15]= with compactc's layout untouched (see "Why") |
+| its shape | follows the standard: a Cell for a magic-only standard, an Array for one with fields | always an Array (never compactc-identical) |
+| opt-in or reserved everywhere | opt-in: only blocks that embed a standard | reserve =root[0]= in every block (moves every circuit) |
+| standards per contract | one; a second is E0080 | a namespace Map |
+| how a standard declares itself | by its type (=PLACEMENT=, a derive) | an attribute on the contract's field (the contract decides, not the standard) |
+| segment width of a headed body | frozen at 15 | follow compactc (breaks headed layouts if compactc moves to 16) |
+| who writes the magic | the deploy state only; no write method | an =initialize= circuit (absent until called, writable) |
+| the reader's walk | the first leaf, 1 to 3 steps; a non-Array root is none | fixed =[0]= / =[0,0]= only (misses plain Compact at 226+ fields) |
+| where the builder lives | values in minocrab-ledger beside the reset constants, the typed builder in minocrab-std | all in minocrab-ledger (untyped paths) |
+| a curve point's deploy default | compactc's JS: the identity | zero limbs (not what compactc deploys) |
+| a =Min= / =And= accumulator at deploy | the cell's default, documented; =set= it | the step's identity (needs an off-chain twin of every identity) |
+| =StateBuilder::set= refusals | panic with the rule named | =Result<_, SetError>= |
+| =initial_state()= on every derived block | required (=InitialState= on every slot) | opt-in through an attribute (a deploy path that depends on remembering it) |
+| =Magic::read(c)= | not offered | an in-circuit read (the constant already serves it) |
+| a general sealed / =Config<T>= cell | not built; the magic's handle only | a =Sealed<T>= kind (your open follow-up) |
+
+* As built (2026-09-23)
+
+Source:
+- =minocrab-std/src/v3/ledger.rs=: =BlockLayout=, =Placement=, =standards=, =FieldPath::in_layout=, =HEADED_SEGMENT=, =at_layout= on the eight slots, =LedgerRepr::default_stored=, =field_path()= and =InitialState= on every slot.
+- =v3/header.rs=: =LedgerHeader=, =pad32=, =Magic=, the sealed =HeaderField=, the derive's const checks.
+- =v3/state.rs=: =InitialState=, =StateBuilder=.
+- =v3/discriminator.rs=: the reader.
+- =v3/blind.rs= and =v3/stream.rs=: the layout threaded through; =contribute=.
+- =minocrab-macros/src/ledger.rs=: =__HEADERS=, =__LAYOUT=, =initial_state()=. =ledger_header.rs=: =#[derive(LedgerHeader)]=. =ledger_repr.rs=: =default_stored= composed.
+- =minocrab-ledger/src/ops.rs=: =stored_cell=, =historic_merkle_tree_reset_value=.
+- minocrab-contracts: =Signet=, =evm_flow::{Pending, Fired}= and =Outbox= take the layout and contribute their members.
+- TRUST.md has a row for each new file.
+
+Gates:
+| gate | file | what it pins |
+|---|---|---|
+| layout | minocrab-std =v3::ledger= unit tests, =tests/v3_header.rs= | every body size 0..=256 against =batch= + 1, the frozen fifteen, the literal paths, declaration-order independence, both header shapes |
+| composite slots | =tests/ledger_header.rs= | a headed treasury and outbox byte-identical to compactc twins; the notification carries =1 ‖ [6]= |
+| rejections | compile_fail doctests on =v3::LedgerHeader= and =Signet= | one per mistake in the table above |
+| deploy + VM | =tests/v3_state.rs=, =tests/ledger_deploy.rs= | the builder equals the resets run through the VM; 18 headed blocks at 0, 1, 14, 15, 16, 30, 211, 225, 226 own fields deploy (=well_formed=, =apply=) and circuits at the first, a middle and the last field land on the rule with the magic bit-identical; the states byte-equal to compactc's JS |
+| reader | =tests/v3_discriminator.rs=, =ledger_deploy.rs= =t5_*= | every shape the rule reads or refuses; the deployed states and compactc's own bytes at =[0]=, =[0,0]=, =[0,0,0]=; malformed bytes are errors |
+| compactc parity | =tests/header_small_differential.rs= + fixtures =header_small=, =header_n15=, =header_n16= | ZKIR, layout, initial state and whole =ContractState= at 4 and 14 own fields; the negative control at 15 |
+| cost | =tests/ledger_header.rs= =t8_*= | the table above |
+| zero movement | the ZKIR dump against the base, =interface_snapshot= | all 214 shipped circuits byte-identical |
+
+Commits A to K on the branch, in the house style "ledger header X: …". No shipped circuit moved at any of them: the dump was compared against the base at each. Workspace suite at the branch's end (Docker, rust 1.95.0, =--locked=): 1359 passed, 2 failed, 45 ignored, the two failures being the base's own (=row_snapshot= +1 row on 11 settles, the =complete_swap= taint finding), with the same text as at the base; the base itself is 1245 / 2 / 42. =interface_snapshot= passes, =trust_base= 2/2. clippy (rust 1.95.0): no new finding against the base. rustfmt: no new hunk against the base (the base is not rustfmt-clean).
+
+* Follow-ups, not taken here
+
+- A MIP draft "ledger header standard": the discriminator format, versioning at =[0,1]=, this reader rule, the trust caveats, a registry.
+- A TypeScript twin of the reader for dApps.
+- A live 2.x devnet run: deploy a headed contract and read it back through the node and the indexer.
+- A compactc proposal (a header modifier), so plain Compact contracts get the stable layout at every size.
+- A committed fixture for the Compact module-import form of the twin, if a standard ships as a Compact module.
+- Upstream: compactc's in-circuit default of a curve point (zero limbs) disagrees with its JS default (the identity).

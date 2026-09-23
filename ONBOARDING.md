@@ -47,6 +47,7 @@ it in.
 | [lean-port.org](notes/lean-port.org) | you touch the Lean proofs (`crates/*/lean/`) — the construct inventory, the model-vs-extraction decision, the limitations discussion |
 | [ledger-abi.org](notes/ledger-abi.org) | you touch anything on-chain-facing — state layout, Impact framing, the comm commitment |
 | [ledger-adts.org](notes/ledger-adts.org) | you touch List/Set/Map/MerkleTree lowering |
+| [ledger-header.org](notes/ledger-header.org) | you embed a standard (`#[derive(LedgerHeader)]`), build a deploy state (`initial_state()`), or read a contract's discriminator — fork work, decisions listed for review |
 | [library-api.org](notes/library-api.org) | you touch the public surface — the tier boundary, the Pass contract, the CLI |
 | [manager-port.org](notes/manager-port.org) | you look at the AA-manager contract |
 | [midnight-code-reuse.org](notes/midnight-code-reuse.org) | you wonder which upstream crate to reuse for something |
