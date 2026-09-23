@@ -169,3 +169,43 @@ property!(refund_supply_matches_spec, Circuit::RefundSupply, gen::refund_supply(
 property!(start_redeem_matches_spec, Circuit::StartRedeem, gen::start_redeem(), spec::spec_start_redeem, |s| &s.env);
 property!(complete_redeem_matches_spec, Circuit::CompleteRedeem, gen::complete_redeem(), spec::spec_complete_redeem, |s| s.env());
 property!(refund_redeem_matches_spec, Circuit::RefundRedeem, gen::refund_redeem(), spec::spec_refund_redeem, |s| s.env());
+
+// ---- the deploy state (project 00002, notes/ledger-header.org) ------------------------
+
+/// The vault's DERIVED deploy state is this harness's pre-state model at its
+/// fresh values: the same segmented skeleton (`[[6 fields], [15 fields]]`)
+/// and every field's default, by two independent routes — the model's
+/// hand-written field list with `segment_of`, and `#[derive(Ledger)]`'s
+/// layout with each slot type's initial value (`initial_state()`).
+///
+/// The two values that are the DEPLOYER's are supplied to both sides: the
+/// sealed signer (a `LedgerField`, which the builder leaves Null) is set to
+/// the model's cell, and the MPC key — which the model starts Null, since
+/// every spec case initializes it — is given the value compactc's
+/// `initialState` gives a fresh `Secp256k1Point` cell, its identity (pinned
+/// against compactc's JS in `tests/ledger_deploy.rs`).
+#[test]
+fn the_derived_initial_state_is_the_models_fresh_state() {
+    use midnight_onchain_state::state::StateValue;
+    use minocrab::Public;
+    use minocrab_contracts::erc20_vault::{Vault, VAULT};
+    use minocrab_std::v3::{LedgerRepr, Secp256k1Point};
+    use vault::prims::{bytesn_value, cell};
+
+    let mut state = Vault::initial_state();
+    state.set(
+        VAULT.signet_signer.field_path(),
+        cell(bytesn_value(32, &[0; 32])),
+    );
+    let StateValue::Cell(ref identity) = minocrab_ledger::stored_cell(
+        Secp256k1Point::<Public>::atoms(),
+        Secp256k1Point::<Public>::default_stored(),
+    ) else {
+        unreachable!("stored_cell builds a Cell")
+    };
+    let model = PreState {
+        mpc_response_key: Some((**identity).clone()),
+        ..PreState::default()
+    };
+    assert!(state.build() == model.state());
+}

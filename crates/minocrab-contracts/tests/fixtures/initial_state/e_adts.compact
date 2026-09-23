@@ -1,0 +1,40 @@
+pragma language_version >= 0.25;
+
+// Project 00002 fixture (fork work) — ONE LEDGER FIELD OF EVERY KIND, the
+// T4b oracle of the deploy-state builder (notes/ledger-header.org).
+//
+//   compactc --skip-zk --feature-zkir-v3 e_adts.compact out   # compactc 0.34.0
+//
+// then run the generated `initialState` in node (project 00002's JS oracle;
+// `e_adts.state.hex` beside this file is its output, with provenance). That
+// is compactc's initial state for these field types, and minocrab's
+// `initial_state()` of the equivalent non-headed `#[derive(Ledger)]` block
+// (`EAdts` in tests/ledger_deploy.rs) must serialize to the same bytes.
+// Fifteen fields: the widest flat root compactc builds. Only the source and
+// the state are committed; `out/` is not needed by any test.
+//
+// No constructor and no circuits: the state is the skeleton plus each field's
+// `resetToDefault`, nothing else.
+
+import CompactStandardLibrary;
+
+struct Pair {
+  a: Uint<16>;
+  b: Bytes<3>;
+}
+
+export ledger b32: Bytes<32>;                          // 0  Cell bytes<32>
+export ledger num: Uint<64>;                           // 1  Cell bytes<8>
+export ledger flag: Boolean;                           // 2  Cell bytes<1>
+export ledger digest: MerkleTreeDigest;                // 3  Cell field
+export ledger name: Opaque<"string">;                  // 4  Cell compress
+export ledger maybe: Maybe<Bytes<32>>;                 // 5  Cell bytes<1>, bytes<32>
+export ledger secp: Secp256k1Point;                    // 6  Cell, a curve point
+export ledger jub: JubjubPoint;                        // 7  Cell, a curve point
+export ledger pair: Pair;                              // 8  Cell bytes<2>, bytes<3>
+export ledger count: Counter;                          // 9
+export ledger m: Map<Bytes<32>, Uint<64>>;             // 10
+export ledger s: Set<Bytes<32>>;                       // 11
+export ledger l: List<Uint<64>>;                       // 12
+export ledger mt: MerkleTree<10, Bytes<32>>;           // 13
+export ledger hmt: HistoricMerkleTree<10, Bytes<32>>;  // 14
