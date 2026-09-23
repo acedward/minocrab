@@ -50,6 +50,11 @@ minocrab-macros = { workspace = true, optional = true }
 # — no crate enters the graph.
 midnight-onchain-state.workspace = true
 midnight-storage.workspace = true
+# The DISCRIMINATOR (v3::discriminator): a contract's serialized, tagged
+# `ContractState` (the node's `midnight_contractState`, the indexer's `state`)
+# is read with the pinned ledger's own `tagged_deserialize`. Already in the
+# graph (every midnight-* crate above depends on it) — no crate enters it.
+midnight-serialize.workspace = true
 
 [features]
 default = ["macros"]

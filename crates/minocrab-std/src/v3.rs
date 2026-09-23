@@ -25,6 +25,7 @@ pub mod __derive {
 
 mod call;
 mod disclose;
+mod discriminator;
 mod entry;
 mod header;
 mod ledger;
@@ -101,6 +102,14 @@ pub use header::{pad32, HeaderField, LedgerHeader, Magic};
 /// constructor would and `build` assembles into the `StateValue` a deploy
 /// carries. [`InitialState`] is each slot type's share of it.
 pub use state::{InitialState, StateBuilder};
+
+/// The discriminator (notes/ledger-header.org): the 32 bytes at a contract
+/// state's first leaf — follow index 0 through at most three Arrays to one
+/// `bytes<32>` Cell, padded back to 32 — read from a `StateValue`
+/// ([`discriminator`]) or a serialized, tagged `ContractState` as the node and
+/// the indexer serve it ([`contract_state_discriminator`]), and compared with
+/// one standard's magic ([`implements`]). Off-chain; a claim, not proof.
+pub use discriminator::{contract_state_discriminator, discriminator, implements};
 
 /// Assertion predicates: `c.assert(less_than(0u64, amount))` — deferred,
 /// `#[must_use]` descriptors whose widths come from the operand types (see
