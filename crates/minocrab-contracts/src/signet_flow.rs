@@ -83,8 +83,9 @@ use minocrab_std::v3::borsh::{BorshReader, CircuitBorsh, FieldSpec, LayoutPath, 
 use minocrab_std::v3::Serializer;
 use minocrab_std::v3::Assumed;
 use minocrab_std::v3::{
-    is_true, kernel, label, not, ArgPath, CircuitAbi, CircuitArg, Disclose, LedgerCell,
-    LedgerCounter, LedgerField, LedgerMap, LedgerRepr, LedgerWidth, Prim, Secp256k1Point, Uint,
+    is_true, kernel, label, not, ArgPath, BlockLayout, CircuitAbi, CircuitArg, Disclose,
+    LedgerCell, LedgerCounter, LedgerField, LedgerMap, LedgerRepr, LedgerWidth, Prim,
+    Secp256k1Point, Uint,
 };
 use signet_signer_interface::notification::construct_notification_v1;
 use signet_signer_interface::{RequestId, SignetSigner};
@@ -194,16 +195,23 @@ pub struct Signet {
 }
 
 impl Signet {
-    /// The five fields from flat index `start` of a block of `total` fields
-    /// (what `#[derive(Ledger)]` calls).
-    pub const fn at_block(total: usize, start: usize) -> Self {
+    /// The five fields from flat body index `start` under `layout` (what
+    /// `#[derive(Ledger)]` calls). In a block with a standard the five
+    /// follow the headed layout like every other body field.
+    pub const fn at_layout(layout: BlockLayout, start: usize) -> Self {
         Signet {
-            signer: LedgerField::at_block(total, start),
-            mpc_response_key: LedgerCell::at_block(total, start + 1),
-            request_nonce: LedgerCounter::at_block(total, start + 2),
-            caip2_id: LedgerCell::at_block(total, start + 3),
-            evm_chain_id: LedgerCell::at_block(total, start + 4),
+            signer: LedgerField::at_layout(layout, start),
+            mpc_response_key: LedgerCell::at_layout(layout, start + 1),
+            request_nonce: LedgerCounter::at_layout(layout, start + 2),
+            caip2_id: LedgerCell::at_layout(layout, start + 3),
+            evm_chain_id: LedgerCell::at_layout(layout, start + 4),
         }
+    }
+
+    /// The five fields from flat index `start` of a block of `total`
+    /// fields, at compactc's layout.
+    pub const fn at_block(total: usize, start: usize) -> Self {
+        Signet::at_layout(BlockLayout::compactc(total), start)
     }
 
     /// The deployment's writes, for a contract's `initialize`: the MPC key

@@ -75,13 +75,13 @@ pub use entry::{entry, entry_out, ArgPath, CircuitArg, CircuitArgs, CircuitOut};
 /// path a block of sixteen fields or more forces), [`KeyPath`] (the runtime
 /// path an `at_key` chain builds), and the sealed pair [`LedgerSlot`] /
 /// [`LedgerAdt`] that splits the value position into plain values and ADT
-/// handles.
+/// handles. A block's [`BlockLayout`] and each slot's [`Placement`] are
+/// what a standard's header at `root[0]` rides on (notes/ledger-header.org).
 pub use ledger::{
-    Fresh,
-    assert_distinct_kinds, leaf_hash, repr_limbs, CoinArm, FieldPath, KeyPath, KeyedPath, LedgerAdt,
-    LedgerCell, LedgerCounter, LedgerField, LedgerHistoricMerkleTree, LedgerList, LedgerMap,
-    LedgerMerkleTree, LedgerPath, LedgerRepr, LedgerSet, LedgerSlot, LedgerWidth,
-    MAX_FIELD_PATH, MAX_LEDGER_PATH, MAX_NESTING,
+    assert_distinct_kinds, leaf_hash, repr_limbs, standards, BlockLayout, CoinArm, FieldPath,
+    Fresh, KeyPath, KeyedPath, LedgerAdt, LedgerCell, LedgerCounter, LedgerField,
+    LedgerHistoricMerkleTree, LedgerList, LedgerMap, LedgerMerkleTree, LedgerPath, LedgerRepr,
+    LedgerSet, LedgerSlot, LedgerWidth, Placement, MAX_FIELD_PATH, MAX_LEDGER_PATH, MAX_NESTING,
 };
 
 /// Assertion predicates: `c.assert(less_than(0u64, amount))` — deferred,

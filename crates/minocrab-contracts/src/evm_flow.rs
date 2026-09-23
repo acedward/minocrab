@@ -505,9 +505,9 @@ use minocrab::{Private, Public};
 use minocrab_std::v3::borsh::CircuitBorsh;
 use minocrab_std::v3::hash::{transient_hash_compact, upgrade_from_transient};
 use minocrab_std::v3::{
-    eq, is_true, label, not, own_public_key, repr_limbs, ArgPath, Bytes, CircuitAbi, CircuitArg,
-    Assumed, Disclose, DisclosureLabel, FieldPath, LedgerMap, LedgerRepr, LedgerWidth, Prim,
-    ProofWires, Uint, Vis3, ZswapCoinPublicKey, B32,
+    eq, is_true, label, not, own_public_key, repr_limbs, ArgPath, Assumed, BlockLayout, Bytes,
+    CircuitAbi, CircuitArg, Disclose, DisclosureLabel, FieldPath, LedgerMap, LedgerRepr,
+    LedgerWidth, Prim, ProofWires, Uint, Vis3, ZswapCoinPublicKey, B32,
 };
 use minocrab::v3::Val;
 use signet_signer_interface::{RequestId, Signature};
@@ -978,7 +978,7 @@ impl<E: LedgerRepr> LedgerRepr for Owned<E> {
 ///
 /// The `Signet` handle is built by `#[derive(Ledger)]`, which finds the
 /// block's one `Signet` field and threads its offset in
-/// ([`Self::at_block_with_signet`]). That is why `request`, `complete` and
+/// ([`Self::at_layout_with_signet`]). That is why `request`, `complete` and
 /// `refund` take no `&SELF.signet`.
 pub struct Pending<F: Filing, Env, const WORDS: usize = 2> {
     records: LedgerMap<RequestId<Public>, EventRecordV2<WORDS>>,
@@ -988,10 +988,15 @@ pub struct Pending<F: Filing, Env, const WORDS: usize = 2> {
 }
 
 impl<F: Filing, Env, const WORDS: usize> Pending<F, Env, WORDS> {
-    /// The slot's two fields from flat index `start`, against the block's
-    /// `Signet` at `signet_start` — what `#[derive(Ledger)]` emits for a
-    /// field whose type is spelled `Pending`.
-    pub const fn at_block_with_signet(total: usize, start: usize, signet_start: usize) -> Self {
+    /// The slot's two fields from flat body index `start`, against the
+    /// block's `Signet` at `signet_start`, both under `layout` — what
+    /// `#[derive(Ledger)]` emits for a field whose type is spelled
+    /// `Pending`.
+    pub const fn at_layout_with_signet(
+        layout: BlockLayout,
+        start: usize,
+        signet_start: usize,
+    ) -> Self {
         const {
             assert!(
                 WORDS == <<Called<F> as EvmCall>::Args as AbiTuple>::WORDS,
@@ -1003,11 +1008,16 @@ impl<F: Filing, Env, const WORDS: usize> Pending<F, Env, WORDS> {
             )
         }
         Pending {
-            records: LedgerMap::at_block(total, start),
-            envs: LedgerMap::at_block(total, start + 1),
-            signet: Signet::at_block(total, signet_start),
+            records: LedgerMap::at_layout(layout, start),
+            envs: LedgerMap::at_layout(layout, start + 1),
+            signet: Signet::at_layout(layout, signet_start),
             _filing: PhantomData,
         }
+    }
+
+    /// The same at compactc's layout of a block of `total` fields.
+    pub const fn at_block_with_signet(total: usize, start: usize, signet_start: usize) -> Self {
+        Self::at_layout_with_signet(BlockLayout::compactc(total), start, signet_start)
     }
 
     /// The record map's ledger path: the notification's `depth ‖ path`.
@@ -1033,10 +1043,14 @@ pub struct Fired<F: Filing, const WORDS: usize = 2> {
 }
 
 impl<F: Filing, const WORDS: usize> Fired<F, WORDS> {
-    /// The slot's one field at flat index `start`, against the block's
-    /// `Signet` at `signet_start` — what `#[derive(Ledger)]` emits for a
-    /// field whose type is spelled `Fired`.
-    pub const fn at_block_with_signet(total: usize, start: usize, signet_start: usize) -> Self {
+    /// The slot's one field at flat body index `start`, against the
+    /// block's `Signet` at `signet_start`, both under `layout` — what
+    /// `#[derive(Ledger)]` emits for a field whose type is spelled `Fired`.
+    pub const fn at_layout_with_signet(
+        layout: BlockLayout,
+        start: usize,
+        signet_start: usize,
+    ) -> Self {
         const {
             assert!(
                 WORDS == <<Called<F> as EvmCall>::Args as AbiTuple>::WORDS,
@@ -1048,10 +1062,15 @@ impl<F: Filing, const WORDS: usize> Fired<F, WORDS> {
             )
         }
         Fired {
-            records: LedgerMap::at_block(total, start),
-            signet: Signet::at_block(total, signet_start),
+            records: LedgerMap::at_layout(layout, start),
+            signet: Signet::at_layout(layout, signet_start),
             _filing: PhantomData,
         }
+    }
+
+    /// The same at compactc's layout of a block of `total` fields.
+    pub const fn at_block_with_signet(total: usize, start: usize, signet_start: usize) -> Self {
+        Self::at_layout_with_signet(BlockLayout::compactc(total), start, signet_start)
     }
 
     /// The record map's ledger path: the notification's `depth ‖ path`.

@@ -41,8 +41,8 @@ use minocrab::{Private, Public};
 use minocrab_ledger::{XcallCommitment, XcallEntryPointHash};
 use minocrab_std::v3::blind::{Add, Max};
 use minocrab_std::v3::{
-    label, own_public_key, repr_limbs, Assumed, Disclose, DisclosureLabel, FieldPath, LedgerRepr, ProofWires,
-    LedgerWidth, Stream, StreamSpec, Uint, ZswapCoinPublicKey,
+    label, own_public_key, repr_limbs, Assumed, BlockLayout, Disclose, DisclosureLabel, FieldPath,
+    LedgerRepr, LedgerWidth, ProofWires, Stream, StreamSpec, Uint, ZswapCoinPublicKey,
 };
 use signet_signer_interface::RequestId;
 
@@ -172,14 +172,23 @@ pub struct Outbox<F: Filing, Env: LedgerRepr, const WORDS: usize> {
 }
 
 impl<F: Filing, Env: LedgerRepr, const WORDS: usize> Outbox<F, Env, WORDS> {
-    /// The slot's seven fields from flat index `start`, against the block's
-    /// `Signet` at `signet_start` — what `#[derive(Ledger)]` emits for a
-    /// field whose type is spelled `Outbox`.
-    pub const fn at_block_with_signet(total: usize, start: usize, signet_start: usize) -> Self {
+    /// The slot's seven fields from flat body index `start`, against the
+    /// block's `Signet` at `signet_start`, all under `layout` — what
+    /// `#[derive(Ledger)]` emits for a field whose type is spelled `Outbox`.
+    pub const fn at_layout_with_signet(
+        layout: BlockLayout,
+        start: usize,
+        signet_start: usize,
+    ) -> Self {
         Outbox {
-            pending: Pending::at_block_with_signet(total, start, signet_start),
-            stream: Stream::at_block(total, start + 2),
+            pending: Pending::at_layout_with_signet(layout, start, signet_start),
+            stream: Stream::at_layout(layout, start + 2),
         }
+    }
+
+    /// The same at compactc's layout of a block of `total` fields.
+    pub const fn at_block_with_signet(total: usize, start: usize, signet_start: usize) -> Self {
+        Self::at_layout_with_signet(BlockLayout::compactc(total), start, signet_start)
     }
 
     /// The record map's ledger path: the notification's `depth ‖ path`.

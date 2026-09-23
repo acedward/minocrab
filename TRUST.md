@@ -46,14 +46,14 @@ suite warrants; this says where the suites stop.
 | `minocrab-ledger/src/tests.rs` | 1037 | **READING** | a unit test that pins the wrong constant or asserts a weaker property than intended, unnoticed because it still passes |
 | `minocrab-std/src/lib.rs` | 51 | **READING** | nothing beyond re-exports (51 lines) |
 | `minocrab-std/src/v3.rs` | 2627 | every differential; v3_leaves / v3_bounded / v3_literals / v3_secp; lean_claims (the typed-leaf claims, crates/minocrab-std/lean). `from_field_unchecked` sites: **READING** (the grep in TRUST.md §3) | a leaf whose type promises a bound its constructor did not constrain |
-| `minocrab-std/src/v3/ledger.rs` | 2073 | every contract differential; v3_ledger; nested_typed; the derive's layout pinned against compactc's `batch` for all 256 block sizes and the sixteen-field probe | a typed slot reading the wrong field, or a segmented path computed differently from compactc |
+| `minocrab-std/src/v3/ledger.rs` | 2347 | every contract differential; v3_ledger; nested_typed; the derive's layout pinned against compactc's `batch` for all 256 block sizes and the sixteen-field probe; the headed layout (`in_layout`) pinned against `batch` + 1 for every body size 0..=256 and its frozen fifteen-wide segment by literal paths | a typed slot reading the wrong field, or a segmented path computed differently from compactc — or a headed body path that collides with root[0] or moves when compactc's segment width does |
 | `minocrab-std/src/v3/borsh.rs` | 1182 | serialization_conformance (vectors shared with the published TypeScript decoder, spec/ts); v3_borsh; the borsh differentials | a non-canonical encoding accepted, breaking the digest's injectivity (api-safety-survey §B3) |
 | `minocrab-std/src/v3/borsh/schema.rs` | 181 | the generated schema cross-check test per #[derive(CircuitBorsh)] (layout ≡ borsh's schema of the spec type) | a layout table disagreeing with the published spec |
 | `minocrab-std/src/v3/kernel.rs` | 782 | kernel_tokens_differential (24 circuits, byte-identical); v3_kernel_cache | a kernel effect claimed at the wrong effects index |
-| `minocrab-std/src/v3/blind.rs` | 424 | v3_blind (every blind op run on Midnight's on-chain VM against a seeded state, zero reads asserted; the typed spellings byte-identical to the explicit op lists); v3_stream; evm_outbox | a blind combine or snapshot that lands a different value than the step defines, or one that embeds a read |
+| `minocrab-std/src/v3/blind.rs` | 434 | v3_blind (every blind op run on Midnight's on-chain VM against a seeded state, zero reads asserted; the typed spellings byte-identical to the explicit op lists); v3_stream; evm_outbox | a blind combine or snapshot that lands a different value than the step defines, or one that embeds a read |
 | `minocrab-std/src/v3/hook.rs` | 423 | v3_hook (every builder method on the on-chain VM, each failure row of the design table, attachment order, guard capture, the after-the-body rule; a composite hook byte-identical to the explicit op lists); the two compile-fail doctests | a hook lowered to ops that read, or emitted under the wrong guard or before an inline effect |
 | `minocrab-std/src/v3/assumed.rs` | 181 | v3_ledger and every contract differential (the wrapper is erased in the ZKIR: byte-identical artifacts); the compile-fail doctest; the backstop's refusals in the contract suites named every read-modify-write in the corpus | a read result re-entering the ledger with nothing naming the assumption — a contended write nobody sees as one |
-| `minocrab-std/src/v3/stream.rs` | 368 | v3_stream (insert / take / combine / sequence on the on-chain VM, both layouts); evm_outbox (the contention audit); fee_ema (flushes of one to four); the two compile-fail doctests | a stream operation reading the shared accumulator where the design says it must not |
+| `minocrab-std/src/v3/stream.rs` | 377 | v3_stream (insert / take / combine / sequence on the on-chain VM, both layouts); evm_outbox (the contention audit); fee_ema (flushes of one to four); the two compile-fail doctests | a stream operation reading the shared accumulator where the design says it must not |
 | `minocrab-std/src/v3/vector.rs` | 355 | v3_vector (fold and for_each on the VM: live slots only, the guard and the select; the all-dead case unexpressible); v3_bounded | a fold applying its step, or a ledger op, on a dead slot |
 | `minocrab-std/src/v3/entry.rs` | 896 | interface_snapshot (every circuit's argument schema frozen); v3_entry; every differential | an argument declared in a different slot order than the wire |
 | `minocrab-std/src/v3/predicate.rs` | 681 | v3_predicates; every differential with a comparison | a comparison at the wrong width, or a message-carrying assert that binds outside its branch |
@@ -65,7 +65,7 @@ suite warrants; this says where the suites stop.
 | `minocrab-macros/src/circuit_arg.rs` | 530 | v3_derive (twin); every derived struct's slots in interface_snapshot | a field's slots declared out of order |
 | `minocrab-macros/src/circuit_borsh.rs` | 495 | v3_borsh_derive (twin) + the generated schema cross-check | a Borsh field encoded at the wrong width |
 | `minocrab-macros/src/interface.rs` | 620 | interface_macro (twin, byte-identical ZKIR); contract_matches_its_interface | a call handle passing limbs in an order the callee does not expect |
-| `minocrab-macros/src/ledger.rs` | 430 | the derive's unit tests; in_block pinned against `batch` for every block size (minocrab-std); the sixteen-field compactc probe | a ledger field laid out at a path compactc would not use |
+| `minocrab-macros/src/ledger.rs` | 544 | the derive's unit tests; in_block pinned against `batch` for every block size (minocrab-std); the sixteen-field compactc probe | a ledger field laid out at a path compactc would not use |
 | `minocrab-macros/src/ledger_repr.rs` | 158 | v3_ledger `derived_repr` (atoms and limb round trip); the erc20_vault_pending lineage's slots | an environment's limbs split at the wrong boundaries on read-back |
 | `minocrab-macros/src/contract.rs` | 229 | circuit_closure (every #[circuit] is listed) + the derived sets feeding both snapshots | a circuit missing from its contract's set |
 | `minocrab-sim/src/lib.rs` | 129 | **READING** | nothing beyond the Profile types (129 lines) |
@@ -74,7 +74,7 @@ suite warrants; this says where the suites stop.
 | `minocrab-sim/src/v3/rowcost.rs` | 391 | calibrated against real proving (BENCHMARK.md); a MEASUREMENT model, not a correctness claim | a mis-priced primitive — a wrong k estimate, never a wrong circuit |
 | `minocrab-sim/src/bin/minocrab.rs` | 222 | **READING** | nothing a proof depends on (the CLI) |
 
-28617 lines in the seven crates; 11203 of them in files whose warrant is READING in whole or in part (the rows in bold).
+29024 lines in the seven crates; 11203 of them in files whose warrant is READING in whole or in part (the rows in bold).
 <!-- GENERATED END -->
 
 ## 2. The read order, with a time budget
